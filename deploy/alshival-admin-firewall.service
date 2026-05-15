@@ -1,0 +1,13 @@
+[Unit]
+Description=Restrict Alshival admin portal ingress
+After=network-online.target
+Wants=network-online.target
+Before=alshival.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/alshival-admin-firewall.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
