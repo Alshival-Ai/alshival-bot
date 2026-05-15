@@ -20,6 +20,7 @@ type GithubRepoSummary = {
   sshUrl: string;
   htmlUrl: string;
   updatedAt: string;
+  accessOrg: string;
 };
 
 type GuildKnowledgeSource = {
@@ -28,6 +29,8 @@ type GuildKnowledgeSource = {
   repoFullName: string;
   repoSshUrl: string;
   repoHtmlUrl: string;
+  indexedAt: string | null;
+  indexedMarkdownFiles: number;
   private: boolean;
   createdAt: string;
 };
@@ -48,6 +51,8 @@ export default function GuildsClient() {
   const [knowledgeSources, setKnowledgeSources] = useState<GuildKnowledgeSource[]>([]);
   const [selectedGuildId, setSelectedGuildId] = useState<string | null>(null);
   const [selectedRepoFullName, setSelectedRepoFullName] = useState("");
+  const [knowledgeSourceMode, setKnowledgeSourceMode] = useState<"select" | "remote">("select");
+  const [remoteOrigin, setRemoteOrigin] = useState("");
   const [guildAgentConfig, setGuildAgentConfig] = useState<GuildAgentConfig | null>(null);
   const [guildAgentProvider, setGuildAgentProvider] = useState<Provider>("openai");
   const [guildAgentModel, setGuildAgentModel] = useState("");
@@ -272,13 +277,20 @@ export default function GuildsClient() {
   }
 
   async function addKnowledgeSource() {
-    if (!selectedGuild || !selectedRepoFullName) {
+    if (!selectedGuild) {
       return;
     }
 
-    const repo = repos.find((candidate) => candidate.fullName === selectedRepoFullName);
+    const repo =
+      knowledgeSourceMode === "select"
+        ? repos.find((candidate) => candidate.fullName === selectedRepoFullName)
+        : null;
 
-    if (!repo) {
+    if (knowledgeSourceMode === "select" && !repo) {
+      return;
+    }
+
+    if (knowledgeSourceMode === "remote" && !remoteOrigin.trim()) {
       return;
     }
 
@@ -289,12 +301,19 @@ export default function GuildsClient() {
       const response = await fetch(`/api/platforms/discord/guilds/${selectedGuild.id}/knowledge`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          repoFullName: repo.fullName,
-          repoSshUrl: repo.sshUrl,
-          repoHtmlUrl: repo.htmlUrl,
-          private: repo.private,
-        }),
+        body: JSON.stringify(
+          repo
+            ? {
+                repoFullName: repo.fullName,
+                repoSshUrl: repo.sshUrl,
+                repoHtmlUrl: repo.htmlUrl,
+                private: repo.private,
+              }
+            : {
+                remoteOrigin,
+                private: true,
+              },
+        ),
       });
       const data = (await response.json()) as {
         sources?: GuildKnowledgeSource[];
@@ -307,6 +326,7 @@ export default function GuildsClient() {
 
       setKnowledgeSources(data.sources ?? []);
       setSelectedRepoFullName("");
+      setRemoteOrigin("");
       setKnowledgeStatus("Knowledge source added.");
     } catch (error) {
       setKnowledgeStatus(error instanceof Error ? error.message : "Could not add knowledge source.");
@@ -541,24 +561,52 @@ export default function GuildsClient() {
                 </div>
                 <div className="knowledge-add-row">
                   <label className="field">
-                    <span>GitHub repository</span>
+                    <span>Source</span>
                     <select
-                      disabled={isKnowledgeLoading || repos.length === 0}
-                      onChange={(event) => setSelectedRepoFullName(event.target.value)}
-                      value={selectedRepoFullName}
+                      disabled={isKnowledgeLoading}
+                      onChange={(event) => setKnowledgeSourceMode(event.target.value as "select" | "remote")}
+                      value={knowledgeSourceMode}
                     >
-                      <option value="">Select a repository</option>
-                      {repos.map((repo) => (
-                        <option key={repo.id} value={repo.fullName}>
-                          {repo.fullName}
-                          {repo.private ? " (private)" : ""}
-                        </option>
-                      ))}
+                      <option value="select">Select a repository</option>
+                      <option value="remote">Add remote origin</option>
                     </select>
                   </label>
+                  {knowledgeSourceMode === "select" ? (
+                    <label className="field">
+                      <span>GitHub repository</span>
+                      <select
+                        disabled={isKnowledgeLoading || repos.length === 0}
+                        onChange={(event) => setSelectedRepoFullName(event.target.value)}
+                        value={selectedRepoFullName}
+                      >
+                        <option value="">Select a repository</option>
+                        {repos.map((repo) => (
+                          <option key={repo.id} value={repo.fullName}>
+                            {repo.fullName} · {repo.accessOrg}
+                            {repo.private ? " (private)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <label className="field">
+                      <span>Remote origin</span>
+                      <input
+                        disabled={isKnowledgeLoading}
+                        onChange={(event) => setRemoteOrigin(event.target.value)}
+                        placeholder="https://github.com/org/repo.git"
+                        value={remoteOrigin}
+                      />
+                    </label>
+                  )}
                   <button
                     className="primary-action fit-content"
-                    disabled={isKnowledgeLoading || selectedRepoFullName.length === 0}
+                    disabled={
+                      isKnowledgeLoading ||
+                      (knowledgeSourceMode === "select"
+                        ? selectedRepoFullName.length === 0
+                        : remoteOrigin.trim().length === 0)
+                    }
                     onClick={() => void addKnowledgeSource()}
                     type="button"
                   >
@@ -566,21 +614,30 @@ export default function GuildsClient() {
                     Add source
                   </button>
                 </div>
-                <p className="status-copy">{knowledgeStatus}</p>
+                <p className="status-copy">
+                  {knowledgeSourceMode === "remote"
+                    ? "Remote origins are normalized to SSH and cloned with the configured GitHub SSH key."
+                    : knowledgeStatus}
+                </p>
+                {knowledgeSourceMode === "remote" ? <p className="status-copy">{knowledgeStatus}</p> : null}
                 <div className="knowledge-source-list">
                   {knowledgeSources.map((source) => (
                     <div className="knowledge-source-row" key={source.id}>
-                      <div>
+                      <span>
                         <strong>{source.repoFullName}</strong>
-                        <small>{source.private ? "Private repo" : "Public repo"}</small>
-                      </div>
+                        <small>
+                          {source.indexedAt
+                            ? `Indexed ${source.indexedMarkdownFiles} Markdown file${source.indexedMarkdownFiles === 1 ? "" : "s"}`
+                            : "Not indexed yet"}
+                        </small>
+                      </span>
                       <button
-                        className="secondary-action compact-action"
+                        className="secondary-action fit-content"
                         disabled={isKnowledgeLoading}
                         onClick={() => void removeKnowledgeSource(source.id)}
                         type="button"
                       >
-                        <Trash2 size={15} />
+                        <Trash2 size={16} />
                         Remove
                       </button>
                     </div>
@@ -589,9 +646,9 @@ export default function GuildsClient() {
               </section>
             </div>
           ) : (
-            <p className="placeholder-copy">
-              Start the Discord bot and invite it to a server to select a guild.
-            </p>
+            <div className="empty-state">
+              <p>Select a Discord guild to manage its agent settings, memory, and knowledge sources.</p>
+            </div>
           )}
         </section>
       </div>

@@ -10,7 +10,7 @@ const discordGuildRoot = path.resolve(agentHome, "platform", "Discord", "Guilds"
 const slackWorkspaceRoot = path.resolve(agentHome, "platform", "Slack", "Workspaces");
 const defaultContextLines = 2;
 
-export type DiscordGuildCodeSearchResult = {
+export type KnowledgeCodeSearchResult = {
   query: string;
   repoFullName?: string;
   count: number;
@@ -61,7 +61,7 @@ async function searchKnowledgeCode(input: {
   query: string;
   repoFullName?: string;
   limit?: number;
-}): Promise<DiscordGuildCodeSearchResult> {
+}): Promise<KnowledgeCodeSearchResult> {
   const query = input.query.trim();
 
   if (!input.contextId.trim()) {
@@ -76,7 +76,7 @@ async function searchKnowledgeCode(input: {
   const sources = getGuildKnowledgeSources(input.contextId).filter(
     (source) => !input.repoFullName || source.repoFullName === input.repoFullName,
   );
-  const results: DiscordGuildCodeSearchResult["results"] = [];
+  const results: KnowledgeCodeSearchResult["results"] = [];
 
   for (const source of sources) {
     if (results.length >= limit) {
@@ -154,7 +154,7 @@ export async function searchDiscordGuildCode(input: {
   query: string;
   repoFullName?: string;
   limit?: number;
-}): Promise<DiscordGuildCodeSearchResult> {
+}): Promise<KnowledgeCodeSearchResult> {
   return searchKnowledgeCode({
     contextId: input.guildId,
     rootPath: discordGuildRoot,
@@ -169,7 +169,7 @@ export async function searchSlackWorkspaceCode(input: {
   query: string;
   repoFullName?: string;
   limit?: number;
-}): Promise<DiscordGuildCodeSearchResult> {
+}): Promise<KnowledgeCodeSearchResult> {
   return searchKnowledgeCode({
     contextId: input.workspaceId,
     rootPath: slackWorkspaceRoot,

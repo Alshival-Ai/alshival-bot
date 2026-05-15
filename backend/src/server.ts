@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { generateAgentResponse } from "./agent.js";
+import { KnowledgeSyncService } from "./knowledgeSync.js";
 import { DiscordPlatformAdapter } from "./platforms/discord.js";
 import { PlatformManager } from "./platforms/manager.js";
 import { SlackPlatformAdapter } from "./platforms/slack.js";
@@ -11,6 +12,7 @@ const port = Number(process.env.BACKEND_PORT ?? 4000);
 const manager = new PlatformManager();
 manager.register(new DiscordPlatformAdapter());
 manager.register(new SlackPlatformAdapter());
+const knowledgeSyncService = new KnowledgeSyncService();
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown) {
   response.writeHead(statusCode, {
@@ -163,6 +165,42 @@ async function handlePlatformRoute(
   sendJson(response, 404, { error: "Unknown platform action." });
 }
 
+async function handleSlackWorkspaceRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  workspaceId: string,
+  action: string,
+) {
+  const adapter = manager.get("slack");
+
+  if (!adapter) {
+    sendJson(response, 404, { error: "Slack platform is not registered." });
+    return;
+  }
+
+  if (action === "start") {
+    if (request.method !== "POST") {
+      methodNotAllowed(response);
+      return;
+    }
+
+    sendJson(response, 200, await (adapter as SlackPlatformAdapter).startWorkspace(workspaceId));
+    return;
+  }
+
+  if (action === "stop") {
+    if (request.method !== "POST") {
+      methodNotAllowed(response);
+      return;
+    }
+
+    sendJson(response, 200, await (adapter as SlackPlatformAdapter).stopWorkspace(workspaceId));
+    return;
+  }
+
+  sendJson(response, 404, { error: "Unknown Slack workspace action." });
+}
+
 const server = createServer((request, response) => {
   void (async () => {
     const url = new URL(request.url ?? "/", `http://${host}:${port}`);
@@ -174,6 +212,17 @@ const server = createServer((request, response) => {
 
     if (url.pathname === "/agent/respond") {
       await handleAgentRoute(request, response);
+      return;
+    }
+
+    const slackWorkspaceMatch = url.pathname.match(/^\/platforms\/slack\/workspaces\/([^/]+)\/([^/]+)$/);
+    if (slackWorkspaceMatch) {
+      await handleSlackWorkspaceRoute(
+        request,
+        response,
+        decodeURIComponent(slackWorkspaceMatch[1]),
+        slackWorkspaceMatch[2],
+      );
       return;
     }
 
@@ -194,9 +243,11 @@ const server = createServer((request, response) => {
 server.listen(port, host, () => {
   console.log(`Alshival backend listening on http://${host}:${port}`);
   void manager.reconcileAll();
+  knowledgeSyncService.start();
 });
 
 function shutdown() {
+  knowledgeSyncService.stop();
   server.close(() => {
     process.exit(0);
   });

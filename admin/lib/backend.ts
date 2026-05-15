@@ -25,6 +25,12 @@ export type SlackWorkspaceSummary = {
   name: string;
   domain: string | null;
   iconUrl: string | null;
+  enabled: boolean;
+  desiredRunning: boolean;
+  running: boolean;
+  ready: boolean;
+  botName: string | null;
+  error?: string;
 };
 
 export type SlackChannelSummary = {
@@ -98,6 +104,18 @@ export async function getDiscordGuilds() {
 
 export async function getSlackWorkspaces() {
   return requestBackendJson<{ workspaces: SlackWorkspaceSummary[] }>("/platforms/slack/workspaces");
+}
+
+export async function startSlackWorkspace(workspaceId: string) {
+  return requestBackend(`/platforms/slack/workspaces/${encodeURIComponent(workspaceId)}/start`, {
+    method: "POST",
+  });
+}
+
+export async function stopSlackWorkspace(workspaceId: string) {
+  return requestBackend(`/platforms/slack/workspaces/${encodeURIComponent(workspaceId)}/stop`, {
+    method: "POST",
+  });
 }
 
 export async function getSlackChannels(workspaceId?: string) {

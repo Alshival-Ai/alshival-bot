@@ -2,7 +2,7 @@ import { ChromaClient } from "chromadb";
 
 type Pipeline = (input: string | string[], options?: Record<string, unknown>) => Promise<unknown>;
 
-export type DiscordGuildKbResult = {
+export type KnowledgeKbResult = {
   collection: string;
   query: string;
   count: number;
@@ -84,7 +84,7 @@ async function searchCollection(input: {
   contextId: string;
   query: string;
   limit?: number;
-}): Promise<DiscordGuildKbResult> {
+}): Promise<KnowledgeKbResult> {
   const query = input.query.trim();
 
   if (!input.contextId.trim()) {
@@ -131,7 +131,7 @@ export async function searchDiscordGuildKb(input: {
   guildId: string;
   query: string;
   limit?: number;
-}): Promise<DiscordGuildKbResult> {
+}): Promise<KnowledgeKbResult> {
   return searchCollection({
     collectionName: getDiscordGuildCollectionName(input.guildId),
     contextId: input.guildId,
@@ -144,7 +144,7 @@ export async function searchSlackWorkspaceKb(input: {
   workspaceId: string;
   query: string;
   limit?: number;
-}): Promise<DiscordGuildKbResult> {
+}): Promise<KnowledgeKbResult> {
   return searchCollection({
     collectionName: getSlackWorkspaceCollectionName(input.workspaceId),
     contextId: input.workspaceId,

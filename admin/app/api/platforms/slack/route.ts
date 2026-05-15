@@ -1,22 +1,26 @@
-import { NextRequest, NextResponse } from "next/server";
 import { getPlatformRuntime } from "@/lib/backend";
-import { getSlackSettings, saveSlackSettings } from "@/lib/db";
+import { NextResponse } from "next/server";
+import { getSlackWorkspaceSettings } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 async function withRuntimeStatus() {
-  const settings = getSlackSettings();
+  const workspaces = getSlackWorkspaceSettings();
 
   try {
     return {
-      ...settings,
+      workspaceCount: workspaces.length,
+      configuredWorkspaceCount: workspaces.filter((workspace) => workspace.hasBotToken && workspace.hasAppToken).length,
+      enabledWorkspaceCount: workspaces.filter((workspace) => workspace.enabled).length,
       runtime: await getPlatformRuntime("slack"),
       backendReachable: true,
     };
   } catch (error) {
     return {
-      ...settings,
+      workspaceCount: workspaces.length,
+      configuredWorkspaceCount: workspaces.filter((workspace) => workspace.hasBotToken && workspace.hasAppToken).length,
+      enabledWorkspaceCount: workspaces.filter((workspace) => workspace.enabled).length,
       runtime: null,
       backendReachable: false,
       backendError: error instanceof Error ? error.message : "Backend is unavailable.",
@@ -25,21 +29,5 @@ async function withRuntimeStatus() {
 }
 
 export async function GET() {
-  return NextResponse.json(await withRuntimeStatus());
-}
-
-export async function POST(request: NextRequest) {
-  const body = (await request.json()) as {
-    botToken?: unknown;
-    appToken?: unknown;
-    enabled?: unknown;
-  };
-
-  saveSlackSettings({
-    botToken: typeof body.botToken === "string" ? body.botToken.trim() : "",
-    appToken: typeof body.appToken === "string" ? body.appToken.trim() : "",
-    enabled: Boolean(body.enabled),
-  });
-
   return NextResponse.json(await withRuntimeStatus());
 }

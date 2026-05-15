@@ -1,4 +1,8 @@
 github/
+!admin/app/(admin)/platforms/github/
+!admin/app/(admin)/platforms/github/**
+!admin/app/api/platforms/github/
+!admin/app/api/platforms/github/**
 
 # Local environment
 .env

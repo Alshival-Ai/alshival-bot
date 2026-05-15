@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import crypto from "node:crypto";
 import path from "node:path";
 
 type DiscordRow = {
@@ -20,6 +21,36 @@ type SaveSlackSettingsInput = {
   enabled: boolean;
 };
 
+type SlackWorkspaceSettingsRow = {
+  workspace_id: string;
+  workspace_name: string | null;
+  workspace_domain: string | null;
+  bot_token: string | null;
+  app_token: string | null;
+  enabled: 0 | 1;
+  desired_running: 0 | 1;
+  bot_user_id: string | null;
+  bot_name: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SafeSlackWorkspaceSettings = {
+  workspaceId: string;
+  workspaceName: string | null;
+  workspaceDomain: string | null;
+  enabled: boolean;
+  desiredRunning: boolean;
+  hasBotToken: boolean;
+  botTokenLast4: string | null;
+  hasAppToken: boolean;
+  appTokenLast4: string | null;
+  botUserId: string | null;
+  botName: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type GithubSshKeyMetadata = {
   privateKeyPath: string;
   publicKeyPath: string;
@@ -31,14 +62,31 @@ export type GithubSshKeyMetadata = {
 export type GithubAccessSettings = {
   oauthClientId: string;
   personalAccessToken: string | null;
+  tokens?: GithubAccessTokenSettings[];
   updatedAt: string | null;
+};
+
+export type GithubAccessTokenSettings = {
+  id: string;
+  org: string;
+  personalAccessToken: string;
+  updatedAt: string;
 };
 
 export type SafeGithubAccessSettings = {
   oauthClientId: string;
   hasPersonalAccessToken: boolean;
   personalAccessTokenLast4: string | null;
+  tokens: SafeGithubAccessTokenSettings[];
   updatedAt: string | null;
+};
+
+export type SafeGithubAccessTokenSettings = {
+  id: string;
+  org: string;
+  hasPersonalAccessToken: boolean;
+  personalAccessTokenLast4: string | null;
+  updatedAt: string;
 };
 
 export type LanguageModelProvider = "openai" | "anthropic";
@@ -154,6 +202,22 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS slack_workspace_settings (
+    workspace_id TEXT PRIMARY KEY,
+    workspace_name TEXT,
+    workspace_domain TEXT,
+    bot_token TEXT,
+    app_token TEXT,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    desired_running INTEGER NOT NULL DEFAULT 0,
+    bot_user_id TEXT,
+    bot_name TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+
+db.exec(`
   CREATE INDEX IF NOT EXISTS idx_slack_channel_messages_channel_sent
   ON slack_channel_messages (workspace_id, channel_id, sent_at, id)
 `);
@@ -259,6 +323,143 @@ export function saveSlackSettings({ botToken, appToken, enabled }: SaveSlackSett
   return getSlackSettings();
 }
 
+function toSafeSlackWorkspaceSettings(row: SlackWorkspaceSettingsRow): SafeSlackWorkspaceSettings {
+  const botToken = row.bot_token ?? "";
+  const appToken = row.app_token ?? "";
+
+  return {
+    workspaceId: row.workspace_id,
+    workspaceName: row.workspace_name,
+    workspaceDomain: row.workspace_domain,
+    enabled: Boolean(row.enabled),
+    desiredRunning: Boolean(row.desired_running),
+    hasBotToken: botToken.length > 0,
+    botTokenLast4: botToken.length > 0 ? botToken.slice(-4) : null,
+    hasAppToken: appToken.length > 0,
+    appTokenLast4: appToken.length > 0 ? appToken.slice(-4) : null,
+    botUserId: row.bot_user_id,
+    botName: row.bot_name,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getSlackWorkspaceSettings() {
+  const rows = db
+    .prepare(
+      `
+        SELECT workspace_id, workspace_name, workspace_domain, bot_token, app_token, enabled, desired_running, bot_user_id, bot_name, created_at, updated_at
+        FROM slack_workspace_settings
+        ORDER BY workspace_name COLLATE NOCASE, workspace_id
+      `,
+    )
+    .all() as SlackWorkspaceSettingsRow[];
+
+  return rows.map(toSafeSlackWorkspaceSettings);
+}
+
+export function getSlackWorkspaceSettingUnsafe(workspaceId: string) {
+  return db
+    .prepare(
+      `
+        SELECT workspace_id, workspace_name, workspace_domain, bot_token, app_token, enabled, desired_running, bot_user_id, bot_name, created_at, updated_at
+        FROM slack_workspace_settings
+        WHERE workspace_id = ?
+      `,
+    )
+    .get(workspaceId) as SlackWorkspaceSettingsRow | undefined;
+}
+
+export function saveSlackWorkspaceSettings(input: {
+  workspaceId: string;
+  workspaceName?: string | null;
+  workspaceDomain?: string | null;
+  botToken: string;
+  appToken: string;
+  enabled: boolean;
+  desiredRunning?: boolean;
+  botUserId?: string | null;
+  botName?: string | null;
+}) {
+  const existing = getSlackWorkspaceSettingUnsafe(input.workspaceId);
+  const now = new Date().toISOString();
+  const botToken = input.botToken.trim() || existing?.bot_token || null;
+  const appToken = input.appToken.trim() || existing?.app_token || null;
+  const desiredRunning = input.desiredRunning ?? Boolean(existing?.desired_running);
+
+  db.prepare(
+    `
+      INSERT INTO slack_workspace_settings (
+        workspace_id,
+        workspace_name,
+        workspace_domain,
+        bot_token,
+        app_token,
+        enabled,
+        desired_running,
+        bot_user_id,
+        bot_name,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(workspace_id) DO UPDATE SET
+        workspace_name = excluded.workspace_name,
+        workspace_domain = excluded.workspace_domain,
+        bot_token = excluded.bot_token,
+        app_token = excluded.app_token,
+        enabled = excluded.enabled,
+        desired_running = excluded.desired_running,
+        bot_user_id = excluded.bot_user_id,
+        bot_name = excluded.bot_name,
+        updated_at = excluded.updated_at
+    `,
+  ).run(
+    input.workspaceId,
+    input.workspaceName ?? existing?.workspace_name ?? null,
+    input.workspaceDomain ?? existing?.workspace_domain ?? null,
+    botToken,
+    appToken,
+    input.enabled ? 1 : 0,
+    desiredRunning ? 1 : 0,
+    input.botUserId ?? existing?.bot_user_id ?? null,
+    input.botName ?? existing?.bot_name ?? null,
+    existing?.created_at ?? now,
+    now,
+  );
+
+  const row = getSlackWorkspaceSettingUnsafe(input.workspaceId);
+
+  if (!row) {
+    throw new Error("Could not save Slack workspace settings.");
+  }
+
+  return toSafeSlackWorkspaceSettings(row);
+}
+
+export function deleteSlackWorkspaceSettings(workspaceId: string) {
+  db.prepare("DELETE FROM slack_workspace_settings WHERE workspace_id = ?").run(workspaceId);
+  return getSlackWorkspaceSettings();
+}
+
+export function setSlackWorkspaceEnabled(workspaceId: string, enabled: boolean) {
+  db.prepare(
+    `
+      UPDATE slack_workspace_settings
+      SET enabled = ?, desired_running = CASE WHEN ? = 0 THEN 0 ELSE desired_running END, updated_at = ?
+      WHERE workspace_id = ?
+    `,
+  ).run(enabled ? 1 : 0, enabled ? 1 : 0, new Date().toISOString(), workspaceId);
+
+  const row = getSlackWorkspaceSettingUnsafe(workspaceId);
+
+  if (!row) {
+    throw new Error("Slack workspace is not configured.");
+  }
+
+  return toSafeSlackWorkspaceSettings(row);
+}
+
 const githubSshKeySetting = "github_ssh_key";
 
 export function getGithubSshKeyMetadata() {
@@ -300,8 +501,51 @@ function toSafeGithubAccessSettings(settings: GithubAccessSettings | null): Safe
     oauthClientId: settings?.oauthClientId ?? "",
     hasPersonalAccessToken: token.length > 0,
     personalAccessTokenLast4: token.length > 0 ? token.slice(-4) : null,
+    tokens: getGithubAccessTokensFromSettings(settings).map((entry) => ({
+      id: entry.id,
+      org: entry.org,
+      hasPersonalAccessToken: entry.personalAccessToken.length > 0,
+      personalAccessTokenLast4: entry.personalAccessToken.length > 0 ? entry.personalAccessToken.slice(-4) : null,
+      updatedAt: entry.updatedAt,
+    })),
     updatedAt: settings?.updatedAt ?? null,
   };
+}
+
+function getGithubAccessTokensFromSettings(settings: GithubAccessSettings | null): GithubAccessTokenSettings[] {
+  if (!settings) {
+    return [];
+  }
+
+  if (Array.isArray(settings.tokens)) {
+    return settings.tokens
+      .filter(
+        (entry) =>
+          typeof entry.id === "string" &&
+          typeof entry.org === "string" &&
+          typeof entry.personalAccessToken === "string" &&
+          entry.personalAccessToken.length > 0,
+      )
+      .map((entry) => ({
+        id: entry.id,
+        org: entry.org.trim() || "default",
+        personalAccessToken: entry.personalAccessToken,
+        updatedAt: entry.updatedAt || settings.updatedAt || new Date().toISOString(),
+      }));
+  }
+
+  if (settings.personalAccessToken) {
+    return [
+      {
+        id: "default",
+        org: "default",
+        personalAccessToken: settings.personalAccessToken,
+        updatedAt: settings.updatedAt ?? new Date().toISOString(),
+      },
+    ];
+  }
+
+  return [];
 }
 
 function getGithubAccessSettingsUnsafe() {
@@ -320,6 +564,10 @@ export function getGithubAccessToken() {
   return getGithubAccessSettingsUnsafe()?.personalAccessToken ?? null;
 }
 
+export function getGithubAccessTokens() {
+  return getGithubAccessTokensFromSettings(getGithubAccessSettingsUnsafe());
+}
+
 export function getGithubAccessSettings() {
   return toSafeGithubAccessSettings(getGithubAccessSettingsUnsafe());
 }
@@ -327,15 +575,52 @@ export function getGithubAccessSettings() {
 export function saveGithubAccessSettings(input: {
   oauthClientId: string;
   personalAccessToken: string;
+  org?: string;
 }) {
   const existing = getGithubAccessSettingsUnsafe();
   const updatedAt = new Date().toISOString();
+  const org = input.org?.trim() || "default";
+  const existingTokens = getGithubAccessTokensFromSettings(existing);
+  const token = input.personalAccessToken.trim();
+  const nextTokens =
+    token.length > 0
+      ? [
+          ...existingTokens.filter((entry) => entry.org.toLowerCase() !== org.toLowerCase()),
+          {
+            id: crypto.randomUUID(),
+            org,
+            personalAccessToken: token,
+            updatedAt,
+          },
+        ].sort((left, right) => left.org.localeCompare(right.org))
+      : existingTokens;
   const settings: GithubAccessSettings = {
     oauthClientId: input.oauthClientId.trim(),
-    personalAccessToken:
-      input.personalAccessToken.trim().length > 0
-        ? input.personalAccessToken.trim()
-        : existing?.personalAccessToken ?? null,
+    personalAccessToken: null,
+    tokens: nextTokens,
+    updatedAt,
+  };
+
+  db.prepare(
+    `
+      INSERT INTO agent_settings (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `,
+  ).run(githubAccessSetting, JSON.stringify(settings), updatedAt);
+
+  return toSafeGithubAccessSettings(settings);
+}
+
+export function deleteGithubAccessToken(tokenId: string) {
+  const existing = getGithubAccessSettingsUnsafe();
+  const updatedAt = new Date().toISOString();
+  const settings: GithubAccessSettings = {
+    oauthClientId: existing?.oauthClientId ?? "",
+    personalAccessToken: null,
+    tokens: getGithubAccessTokensFromSettings(existing).filter((entry) => entry.id !== tokenId),
     updatedAt,
   };
 
@@ -778,6 +1063,8 @@ export type GuildKnowledgeSource = {
   indexedAt: string | null;
   indexedMarkdownFiles: number;
   indexedChunks: number;
+  markdownSignature: string | null;
+  markdownManifest: string | null;
   private: boolean;
   createdAt: string;
 };
@@ -819,6 +1106,12 @@ if (!guildKnowledgeColumns.some((column) => column.name === "indexed_markdown_fi
 if (!guildKnowledgeColumns.some((column) => column.name === "indexed_chunks")) {
   db.exec("ALTER TABLE guild_knowledge_sources ADD COLUMN indexed_chunks INTEGER NOT NULL DEFAULT 0");
 }
+if (!guildKnowledgeColumns.some((column) => column.name === "markdown_signature")) {
+  db.exec("ALTER TABLE guild_knowledge_sources ADD COLUMN markdown_signature TEXT");
+}
+if (!guildKnowledgeColumns.some((column) => column.name === "markdown_manifest")) {
+  db.exec("ALTER TABLE guild_knowledge_sources ADD COLUMN markdown_manifest TEXT");
+}
 
 function toGuildKnowledgeSource(row: {
   id: number;
@@ -831,6 +1124,8 @@ function toGuildKnowledgeSource(row: {
   indexed_at: string | null;
   indexed_markdown_files: number;
   indexed_chunks: number;
+  markdown_signature: string | null;
+  markdown_manifest: string | null;
   private: 0 | 1;
   created_at: string;
 }): GuildKnowledgeSource {
@@ -845,6 +1140,8 @@ function toGuildKnowledgeSource(row: {
     indexedAt: row.indexed_at,
     indexedMarkdownFiles: row.indexed_markdown_files,
     indexedChunks: row.indexed_chunks,
+    markdownSignature: row.markdown_signature,
+    markdownManifest: row.markdown_manifest,
     private: Boolean(row.private),
     createdAt: row.created_at,
   };
@@ -854,7 +1151,7 @@ export function getGuildKnowledgeSources(guildId: string) {
   const rows = db
     .prepare(
       `
-        SELECT id, platform, repo_full_name, repo_ssh_url, repo_html_url, clone_path, vector_collection, indexed_at, indexed_markdown_files, indexed_chunks, private, created_at
+        SELECT id, platform, repo_full_name, repo_ssh_url, repo_html_url, clone_path, vector_collection, indexed_at, indexed_markdown_files, indexed_chunks, markdown_signature, markdown_manifest, private, created_at
         FROM guild_knowledge_sources
         WHERE guild_id = ?
         ORDER BY created_at DESC
@@ -912,7 +1209,7 @@ export function getGuildKnowledgeSource(guildId: string, sourceId: number) {
   const row = db
     .prepare(
       `
-        SELECT id, platform, repo_full_name, repo_ssh_url, repo_html_url, clone_path, vector_collection, indexed_at, indexed_markdown_files, indexed_chunks, private, created_at
+        SELECT id, platform, repo_full_name, repo_ssh_url, repo_html_url, clone_path, vector_collection, indexed_at, indexed_markdown_files, indexed_chunks, markdown_signature, markdown_manifest, private, created_at
         FROM guild_knowledge_sources
         WHERE guild_id = ? AND id = ?
       `,
@@ -926,7 +1223,7 @@ export function getGuildKnowledgeSourceByRepo(guildId: string, repoFullName: str
   const row = db
     .prepare(
       `
-        SELECT id, platform, repo_full_name, repo_ssh_url, repo_html_url, clone_path, vector_collection, indexed_at, indexed_markdown_files, indexed_chunks, private, created_at
+        SELECT id, platform, repo_full_name, repo_ssh_url, repo_html_url, clone_path, vector_collection, indexed_at, indexed_markdown_files, indexed_chunks, markdown_signature, markdown_manifest, private, created_at
         FROM guild_knowledge_sources
         WHERE guild_id = ? AND platform = ? AND repo_full_name = ?
       `,
@@ -942,6 +1239,8 @@ export function updateGuildKnowledgeIndexMetadata(input: {
   vectorCollection: string;
   indexedMarkdownFiles: number;
   indexedChunks: number;
+  markdownSignature?: string;
+  markdownManifest?: string;
 }) {
   db.prepare(
     `
@@ -950,7 +1249,9 @@ export function updateGuildKnowledgeIndexMetadata(input: {
         vector_collection = ?,
         indexed_at = ?,
         indexed_markdown_files = ?,
-        indexed_chunks = ?
+        indexed_chunks = ?,
+        markdown_signature = COALESCE(?, markdown_signature),
+        markdown_manifest = COALESCE(?, markdown_manifest)
       WHERE guild_id = ? AND id = ?
     `,
   ).run(
@@ -958,6 +1259,8 @@ export function updateGuildKnowledgeIndexMetadata(input: {
     new Date().toISOString(),
     input.indexedMarkdownFiles,
     input.indexedChunks,
+    input.markdownSignature ?? null,
+    input.markdownManifest ?? null,
     input.guildId,
     input.sourceId,
   );

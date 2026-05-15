@@ -31,6 +31,12 @@ export type SlackWorkspaceSummary = {
   name: string;
   domain: string | null;
   iconUrl: string | null;
+  enabled: boolean;
+  desiredRunning: boolean;
+  running: boolean;
+  ready: boolean;
+  botName: string | null;
+  error?: string;
 };
 
 export type SlackChannelSummary = {

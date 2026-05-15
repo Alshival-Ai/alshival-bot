@@ -3,9 +3,12 @@ import { generateAgentResponse } from "../agent.js";
 import {
   getDueSlackReminders,
   getPlatformSettings,
+  getSlackWorkspaceSettings,
   markReminderSent,
   saveSlackChannelMessage,
+  saveSlackWorkspaceSetting,
   setDesiredRunning,
+  setSlackWorkspaceDesiredRunning,
   type Reminder,
 } from "../db.js";
 import type {
@@ -29,45 +32,86 @@ type SlackMessageEvent = {
   bot_id?: string;
 };
 
+type SlackWorkspaceRuntime = {
+  app: App;
+  workspaceId: string;
+  workspaceName?: string;
+  workspaceDomain?: string;
+  botUserId?: string;
+  displayName?: string;
+  ready: boolean;
+  error?: string;
+};
+
+type SlackWorkspaceStartInput = {
+  workspaceId?: string;
+  workspaceName?: string | null;
+  workspaceDomain?: string | null;
+  botToken: string;
+  appToken: string;
+  enabled: boolean;
+  desiredRunning: boolean;
+};
+
 export class SlackPlatformAdapter implements PlatformAdapter {
   readonly platform = "slack";
 
-  private app: App | null = null;
-  private ready = false;
-  private displayName: string | undefined;
-  private workspaceId: string | undefined;
-  private workspaceName: string | undefined;
-  private botUserId: string | undefined;
+  private runtimes = new Map<string, SlackWorkspaceRuntime>();
   private error: string | undefined;
   private starting: Promise<PlatformStatus> | null = null;
   private reminderInterval: NodeJS.Timeout | null = null;
   private processingReminders = false;
 
   status(): PlatformStatus {
-    const settings = getPlatformSettings(this.platform);
-    const token = settings?.bot_token ?? "";
-    const appToken = settings?.app_token ?? "";
+    const settings = getSlackWorkspaceSettings();
+    const legacySettings = getPlatformSettings(this.platform);
+    const hasLegacyConnection = Boolean(legacySettings?.bot_token && legacySettings.app_token);
+    const running = [...this.runtimes.values()];
+    const ready = running.filter((runtime) => runtime.ready);
+    const error = running.find((runtime) => runtime.error)?.error ?? this.error;
 
     return {
       platform: this.platform,
-      configured: token.length > 0 && appToken.length > 0,
-      enabled: Boolean(settings?.enabled),
-      desiredRunning: Boolean(settings?.desired_running),
-      running: this.app !== null,
-      ready: this.ready,
-      displayName: this.displayName,
-      error: this.error,
+      configured: settings.some((setting) => Boolean(setting.bot_token && setting.app_token)) || hasLegacyConnection,
+      enabled: settings.some((setting) => Boolean(setting.enabled)) || Boolean(legacySettings?.enabled),
+      desiredRunning:
+        settings.some((setting) => Boolean(setting.desired_running)) || Boolean(legacySettings?.desired_running),
+      running: running.length > 0,
+      ready: ready.length > 0,
+      displayName:
+        ready.length === 1
+          ? ready[0].displayName
+          : ready.length > 1
+            ? `${ready.length} Slack workspaces`
+            : undefined,
+      error,
     };
   }
 
   async reconcile() {
-    const status = this.status();
+    const settings = getSlackWorkspaceSettings();
+    const shouldRun = settings.some(
+      (setting) => setting.enabled && setting.desired_running && setting.bot_token && setting.app_token,
+    );
+    const legacySettings = getPlatformSettings(this.platform);
+    const shouldMigrateLegacy =
+      settings.length === 0 &&
+      Boolean(
+        legacySettings?.enabled &&
+          legacySettings.desired_running &&
+          legacySettings.bot_token &&
+          legacySettings.app_token,
+      );
 
-    if (status.configured && status.enabled && status.desiredRunning && !status.running) {
+    if (shouldMigrateLegacy) {
       return this.start();
     }
 
-    return status;
+    if (shouldRun) {
+      return this.startDesiredWorkspaces();
+    }
+
+    return this.status();
   }
 
   async start() {
@@ -86,61 +130,87 @@ export class SlackPlatformAdapter implements PlatformAdapter {
     setDesiredRunning(this.platform, false);
     this.error = undefined;
 
+    for (const setting of getSlackWorkspaceSettings()) {
+      setSlackWorkspaceDesiredRunning(setting.workspace_id, false);
+    }
+
     if (this.reminderInterval) {
       clearInterval(this.reminderInterval);
+      this.reminderInterval = null;
     }
 
-    if (this.app) {
-      await this.app.stop();
+    await Promise.all([...this.runtimes.values()].map((runtime) => runtime.app.stop().catch(() => undefined)));
+    this.runtimes.clear();
+
+    return this.status();
+  }
+
+  async startWorkspace(workspaceId: string) {
+    const setting = getSlackWorkspaceSettings().find((workspace) => workspace.workspace_id === workspaceId);
+
+    if (!setting) {
+      throw new Error(`Slack workspace ${workspaceId} is not configured.`);
     }
 
-    this.app = null;
-    this.ready = false;
-    this.displayName = undefined;
-    this.workspaceId = undefined;
-    this.workspaceName = undefined;
-    this.botUserId = undefined;
-    this.reminderInterval = null;
+    setSlackWorkspaceDesiredRunning(workspaceId, true);
+    await this.startRuntime({
+      workspaceId: setting.workspace_id,
+      workspaceName: setting.workspace_name,
+      workspaceDomain: setting.workspace_domain,
+      botToken: setting.bot_token ?? "",
+      appToken: setting.app_token ?? "",
+      enabled: Boolean(setting.enabled),
+      desiredRunning: true,
+    });
+
+    return this.status();
+  }
+
+  async stopWorkspace(workspaceId: string) {
+    setSlackWorkspaceDesiredRunning(workspaceId, false);
+    const runtime = this.runtimes.get(workspaceId);
+
+    if (runtime) {
+      await runtime.app.stop().catch(() => undefined);
+      this.runtimes.delete(workspaceId);
+    }
 
     return this.status();
   }
 
   async listWorkspaces(): Promise<SlackWorkspaceSummary[]> {
-    if (!this.app || !this.ready) {
-      throw new Error("Slack bot must be running before workspaces can be listed.");
-    }
+    const settings = getSlackWorkspaceSettings();
 
-    const auth = await this.app.client.auth.test();
-    const team = auth.team_id ? await this.app.client.team.info({ team: auth.team_id }) : null;
-    const info = team?.team as
-      | {
-          id?: string;
-          name?: string;
-          domain?: string;
-          icon?: { image_68?: string; image_88?: string; image_132?: string };
-        }
-      | undefined;
+    return settings.map((setting) => {
+      const runtime = this.runtimes.get(setting.workspace_id);
 
-    return [
-      {
-        id: auth.team_id ?? this.workspaceId ?? "",
-        name: info?.name ?? auth.team ?? this.workspaceName ?? "Slack workspace",
-        domain: info?.domain ?? null,
-        iconUrl: info?.icon?.image_132 ?? info?.icon?.image_88 ?? info?.icon?.image_68 ?? null,
-      },
-    ].filter((workspace) => workspace.id);
+      return {
+        id: setting.workspace_id,
+        name:
+          runtime?.workspaceName ??
+          setting.workspace_name ??
+          runtime?.displayName ??
+          setting.bot_name ??
+          "Slack workspace",
+        domain: runtime?.workspaceDomain ?? setting.workspace_domain ?? null,
+        iconUrl: null,
+        enabled: Boolean(setting.enabled),
+        desiredRunning: Boolean(setting.desired_running),
+        running: Boolean(runtime),
+        ready: Boolean(runtime?.ready),
+        botName: runtime?.displayName ?? setting.bot_name,
+        error: runtime?.error,
+      };
+    });
   }
 
-  async listChannels(_workspaceId?: string): Promise<SlackChannelSummary[]> {
-    if (!this.app || !this.ready) {
-      throw new Error("Slack bot must be running before channels can be listed.");
-    }
-
+  async listChannels(workspaceId?: string): Promise<SlackChannelSummary[]> {
+    const runtime = this.getRuntime(workspaceId);
     const channels: SlackChannelSummary[] = [];
     let cursor: string | undefined;
 
     do {
-      const response = await this.app.client.conversations.list({
+      const response = await runtime.app.client.conversations.list({
         exclude_archived: false,
         limit: 200,
         cursor,
@@ -168,6 +238,22 @@ export class SlackPlatformAdapter implements PlatformAdapter {
     } while (cursor);
 
     return channels.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  private getRuntime(workspaceId?: string) {
+    const runtime = workspaceId
+      ? this.runtimes.get(workspaceId)
+      : [...this.runtimes.values()].find((candidate) => candidate.ready);
+
+    if (!runtime || !runtime.ready) {
+      throw new Error(
+        workspaceId
+          ? `Slack workspace ${workspaceId} is not running.`
+          : "Slack bot must be running before channels can be listed.",
+      );
+    }
+
+    return runtime;
   }
 
   private splitSlackReply(text: string) {
@@ -248,13 +334,11 @@ export class SlackPlatformAdapter implements PlatformAdapter {
     return lines.join("\n");
   }
 
-  private async sendChannelMessage(channelId: string, content: string) {
-    if (!this.app) {
-      throw new Error("Slack client is not running.");
-    }
+  private async sendChannelMessage(workspaceId: string, channelId: string, content: string) {
+    const runtime = this.getRuntime(workspaceId);
 
     for (const chunk of this.splitSlackText(content)) {
-      await this.app.client.chat.postMessage({
+      await runtime.app.client.chat.postMessage({
         channel: channelId,
         text: chunk,
         unfurl_links: true,
@@ -275,7 +359,7 @@ export class SlackPlatformAdapter implements PlatformAdapter {
   }
 
   private async processDueReminders() {
-    if (!this.app || !this.ready || this.processingReminders) {
+    if (this.processingReminders || this.runtimes.size === 0) {
       return;
     }
 
@@ -285,12 +369,12 @@ export class SlackPlatformAdapter implements PlatformAdapter {
       const reminders = getDueSlackReminders(new Date().toISOString());
 
       for (const reminder of reminders) {
-        if (!reminder.channelId) {
-          console.error(`Reminder ${reminder.id} is missing a Slack channel ID.`);
+        if (!reminder.channelId || !reminder.guildId) {
+          console.error(`Reminder ${reminder.id} is missing a Slack workspace or channel ID.`);
           continue;
         }
 
-        await this.sendChannelMessage(reminder.channelId, this.formatReminder(reminder));
+        await this.sendChannelMessage(reminder.guildId, reminder.channelId, this.formatReminder(reminder));
         markReminderSent(reminder.id);
       }
     } catch (error) {
@@ -302,26 +386,19 @@ export class SlackPlatformAdapter implements PlatformAdapter {
     }
   }
 
-  private shouldRespond(message: SlackMessageEvent) {
+  private shouldRespond(runtime: SlackWorkspaceRuntime, message: SlackMessageEvent) {
     const text = message.text ?? "";
 
     if (text.toLowerCase().includes("alshival")) {
       return true;
     }
 
-    return Boolean(this.botUserId && text.includes(`<@${this.botUserId}>`));
+    return Boolean(runtime.botUserId && text.includes(`<@${runtime.botUserId}>`));
   }
 
-  private async getUserDisplay(userId: string) {
-    if (!this.app) {
-      return {
-        username: userId,
-        displayName: userId,
-      };
-    }
-
+  private async getUserDisplay(runtime: SlackWorkspaceRuntime, userId: string) {
     try {
-      const result = await this.app.client.users.info({ user: userId });
+      const result = await runtime.app.client.users.info({ user: userId });
       const user = result.user;
       const profile = user?.profile;
       const username = user?.name ?? userId;
@@ -338,18 +415,29 @@ export class SlackPlatformAdapter implements PlatformAdapter {
     }
   }
 
-  private registerHandlers(app: App) {
+  private registerHandlers(app: App, runtime: SlackWorkspaceRuntime) {
+    const handleSlackMessage = async (message: SlackMessageEvent) => {
+      try {
+        await this.handleMessage(runtime, message);
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : "Unknown Slack message handler error.";
+        runtime.error = messageText;
+        this.error = messageText;
+        console.error(`Slack message handler error (${runtime.workspaceId}): ${messageText}`);
+      }
+    };
+
     app.event("app_mention", async ({ event }) => {
-      await this.handleMessage(event as SlackMessageEvent);
+      await handleSlackMessage(event as SlackMessageEvent);
     });
 
     app.message(async ({ message }) => {
-      await this.handleMessage(message as SlackMessageEvent);
+      await handleSlackMessage(message as SlackMessageEvent);
     });
   }
 
-  private async handleMessage(message: SlackMessageEvent) {
-    if (!this.app || !this.ready) {
+  private async handleMessage(runtime: SlackWorkspaceRuntime, message: SlackMessageEvent) {
+    if (!runtime.ready) {
       return;
     }
 
@@ -364,20 +452,16 @@ export class SlackPlatformAdapter implements PlatformAdapter {
       return;
     }
 
-    if (this.botUserId && message.user === this.botUserId) {
+    if (runtime.botUserId && message.user === runtime.botUserId) {
       return;
     }
 
-    const workspaceId = message.team ?? this.workspaceId;
-    if (!workspaceId) {
-      return;
-    }
-
+    const workspaceId = message.team ?? runtime.workspaceId;
     const sentAt = new Date(Number(message.ts.split(".")[0]) * 1000).toISOString();
-    const author = await this.getUserDisplay(message.user);
+    const author = await this.getUserDisplay(runtime, message.user);
     const authorMention = `<@${message.user}>`;
 
-    saveSlackChannelMessage({
+    const savedMessage = saveSlackChannelMessage({
       workspaceId,
       channelId: message.channel,
       messageId: message.ts,
@@ -390,7 +474,11 @@ export class SlackPlatformAdapter implements PlatformAdapter {
       sentAt,
     });
 
-    if (!this.shouldRespond(message)) {
+    if (savedMessage.changes === 0) {
+      return;
+    }
+
+    if (!this.shouldRespond(runtime, message)) {
       return;
     }
 
@@ -413,11 +501,10 @@ export class SlackPlatformAdapter implements PlatformAdapter {
     const outboundMessages = textChunks.length > 0 ? textChunks : replyParts.gifUrls.slice(0, 1);
     let firstResponseTs: string | undefined;
 
-    for (const [index, chunk] of outboundMessages.entries()) {
-      const result = await this.app.client.chat.postMessage({
+    for (const chunk of outboundMessages) {
+      const result = await runtime.app.client.chat.postMessage({
         channel: message.channel,
         text: chunk || "Done.",
-        thread_ts: index === 0 ? message.ts : undefined,
         unfurl_links: true,
         unfurl_media: true,
       });
@@ -426,7 +513,7 @@ export class SlackPlatformAdapter implements PlatformAdapter {
 
     const gifUrlsToSend = textChunks.length > 0 ? replyParts.gifUrls : replyParts.gifUrls.slice(1);
     for (const gifUrl of gifUrlsToSend) {
-      await this.app.client.chat.postMessage({
+      await runtime.app.client.chat.postMessage({
         channel: message.channel,
         text: gifUrl,
         unfurl_links: true,
@@ -440,10 +527,10 @@ export class SlackPlatformAdapter implements PlatformAdapter {
         channelId: message.channel,
         messageId: firstResponseTs,
         role: "assistant",
-        authorId: this.botUserId ?? "slack-bot",
-        authorUsername: this.displayName ?? "Alshival",
-        authorDisplayName: this.displayName ?? "Alshival",
-        authorMention: this.botUserId ? `<@${this.botUserId}>` : "@Alshival",
+        authorId: runtime.botUserId ?? "slack-bot",
+        authorUsername: runtime.displayName ?? "Alshival",
+        authorDisplayName: runtime.displayName ?? "Alshival",
+        authorMention: runtime.botUserId ? `<@${runtime.botUserId}>` : "@Alshival",
         content: [replyParts.text, ...replyParts.gifUrls].filter(Boolean).join("\n"),
         sentAt: new Date().toISOString(),
       });
@@ -451,70 +538,160 @@ export class SlackPlatformAdapter implements PlatformAdapter {
   }
 
   private async startInternal() {
-    const settings = getPlatformSettings(this.platform);
-    const botToken = settings?.bot_token ?? "";
-    const appToken = settings?.app_token ?? "";
+    const settings = getSlackWorkspaceSettings();
 
-    if (!botToken || !appToken) {
-      this.error = "Slack bot token and app-level Socket Mode token are required.";
+    if (settings.length > 0) {
+      for (const setting of settings) {
+        if (!setting.enabled || !setting.bot_token || !setting.app_token) {
+          continue;
+        }
+
+        setSlackWorkspaceDesiredRunning(setting.workspace_id, true);
+        await this.startRuntime({
+          workspaceId: setting.workspace_id,
+          workspaceName: setting.workspace_name,
+          workspaceDomain: setting.workspace_domain,
+          botToken: setting.bot_token,
+          appToken: setting.app_token,
+          enabled: Boolean(setting.enabled),
+          desiredRunning: true,
+        });
+      }
+
       return this.status();
     }
 
-    if (!settings?.enabled) {
+    const legacySettings = getPlatformSettings(this.platform);
+    const legacyBotToken = legacySettings?.bot_token ?? "";
+    const legacyAppToken = legacySettings?.app_token ?? "";
+
+    if (!legacyBotToken || !legacyAppToken) {
+      this.error = "At least one Slack workspace connection is required.";
+      return this.status();
+    }
+
+    if (!legacySettings?.enabled) {
       this.error = "Slack platform is disabled.";
       return this.status();
     }
 
     setDesiredRunning(this.platform, true);
+    await this.startRuntime({
+      botToken: legacyBotToken,
+      appToken: legacyAppToken,
+      enabled: true,
+      desiredRunning: true,
+    });
 
-    if (this.app && this.ready) {
-      this.error = undefined;
-      return this.status();
+    return this.status();
+  }
+
+  private async startDesiredWorkspaces() {
+    for (const setting of getSlackWorkspaceSettings()) {
+      if (!setting.enabled || !setting.desired_running || !setting.bot_token || !setting.app_token) {
+        continue;
+      }
+
+      await this.startRuntime({
+        workspaceId: setting.workspace_id,
+        workspaceName: setting.workspace_name,
+        workspaceDomain: setting.workspace_domain,
+        botToken: setting.bot_token,
+        appToken: setting.app_token,
+        enabled: Boolean(setting.enabled),
+        desiredRunning: Boolean(setting.desired_running),
+      });
     }
 
-    if (this.app) {
-      await this.app.stop();
+    return this.status();
+  }
+
+  private async startRuntime(input: SlackWorkspaceStartInput) {
+    if (!input.botToken || !input.appToken) {
+      this.error = "Slack bot token and app-level Socket Mode token are required.";
+      return;
     }
 
-    this.ready = false;
-    this.displayName = undefined;
-    this.workspaceId = undefined;
-    this.workspaceName = undefined;
-    this.botUserId = undefined;
-    this.error = undefined;
+    if (!input.enabled) {
+      this.error = "Slack workspace connection is disabled.";
+      return;
+    }
 
     const app = new App({
-      token: botToken,
-      appToken,
+      token: input.botToken,
+      appToken: input.appToken,
       socketMode: true,
     });
 
-    this.registerHandlers(app);
-    this.app = app;
+    let runtime: SlackWorkspaceRuntime | null = null;
 
     try {
       const auth = await app.client.auth.test();
-      this.workspaceId = auth.team_id;
-      this.workspaceName = auth.team;
-      this.botUserId = auth.user_id;
-      this.displayName = auth.user ?? "Alshival";
+      const workspaceId = auth.team_id ?? input.workspaceId;
+
+      if (!workspaceId) {
+        throw new Error("Slack auth.test did not return a workspace ID.");
+      }
+
+      if (input.workspaceId && input.workspaceId !== workspaceId) {
+        throw new Error(`Slack bot token belongs to workspace ${workspaceId}, not ${input.workspaceId}.`);
+      }
+
+      const team = await app.client.team.info({ team: workspaceId }).catch(() => null);
+      const info = team?.team as { name?: string; domain?: string } | undefined;
+      const existingRuntime = this.runtimes.get(workspaceId);
+
+      if (existingRuntime?.ready) {
+        existingRuntime.error = undefined;
+        return;
+      }
+
+      if (existingRuntime) {
+        await existingRuntime.app.stop().catch(() => undefined);
+        this.runtimes.delete(workspaceId);
+      }
+
+      runtime = {
+        app,
+        workspaceId,
+        workspaceName: info?.name ?? auth.team ?? input.workspaceName ?? undefined,
+        workspaceDomain: info?.domain ?? input.workspaceDomain ?? undefined,
+        botUserId: auth.user_id,
+        displayName: auth.user ?? "Alshival",
+        ready: false,
+      };
+      this.registerHandlers(app, runtime);
+      this.runtimes.set(workspaceId, runtime);
+
       await app.start();
-      this.ready = true;
+      runtime.ready = true;
+      runtime.error = undefined;
       this.error = undefined;
-      console.log(`Slack bot is online as ${this.displayName ?? "unknown user"}`);
+
+      saveSlackWorkspaceSetting({
+        workspaceId,
+        workspaceName: runtime.workspaceName,
+        workspaceDomain: runtime.workspaceDomain,
+        botToken: input.botToken,
+        appToken: input.appToken,
+        enabled: true,
+        desiredRunning: input.desiredRunning,
+        botUserId: runtime.botUserId,
+        botName: runtime.displayName,
+      });
+
+      console.log(`Slack bot is online as ${runtime.displayName ?? "unknown user"} in ${workspaceId}`);
       console.log("Slack message trigger is listening for app mentions or messages containing: alshival");
       this.startReminderJob();
     } catch (error) {
       await app.stop().catch(() => undefined);
-      this.app = null;
-      this.ready = false;
-      this.displayName = undefined;
-      this.workspaceId = undefined;
-      this.workspaceName = undefined;
-      this.botUserId = undefined;
-      this.error = error instanceof Error ? error.message : "Slack login failed.";
-    }
 
-    return this.status();
+      if (runtime) {
+        this.runtimes.delete(runtime.workspaceId);
+      }
+
+      const message = error instanceof Error ? error.message : "Slack login failed.";
+      this.error = message;
+    }
   }
 }

@@ -58,6 +58,20 @@ export type SlackChannelMessage = {
   createdAt: string;
 };
 
+export type SlackWorkspaceSettingsRow = {
+  workspace_id: string;
+  workspace_name: string | null;
+  workspace_domain: string | null;
+  bot_token: string | null;
+  app_token: string | null;
+  enabled: 0 | 1;
+  desired_running: 0 | 1;
+  bot_user_id: string | null;
+  bot_name: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type McpToolSettings = {
   gifSearch: {
     enabled: boolean;
@@ -70,9 +84,25 @@ export type McpToolSettings = {
 
 export type GuildKnowledgeSource = {
   id: number;
+  guildId: string;
   repoFullName: string;
+  repoSshUrl: string;
+  repoHtmlUrl: string;
   clonePath: string;
+  vectorCollection: string | null;
   indexedAt: string | null;
+  indexedMarkdownFiles: number;
+  indexedChunks: number;
+  markdownSignature: string | null;
+  markdownManifest: string | null;
+};
+
+export type GithubSshKeyMetadata = {
+  privateKeyPath: string;
+  publicKeyPath: string;
+  publicKey: string;
+  fingerprint: string;
+  updatedAt: string;
 };
 
 export type ReminderStatus = "pending" | "sent" | "cancelled";
@@ -151,6 +181,22 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS slack_workspace_settings (
+    workspace_id TEXT PRIMARY KEY,
+    workspace_name TEXT,
+    workspace_domain TEXT,
+    bot_token TEXT,
+    app_token TEXT,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    desired_running INTEGER NOT NULL DEFAULT 0,
+    bot_user_id TEXT,
+    bot_name TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+
+db.exec(`
   CREATE INDEX IF NOT EXISTS idx_discord_channel_messages_channel_sent
   ON discord_channel_messages (guild_id, channel_id, sent_at, id)
 `);
@@ -178,6 +224,31 @@ db.exec(`
     UNIQUE(guild_id, platform, repo_full_name)
   )
 `);
+
+const guildKnowledgeColumns = db
+  .prepare("PRAGMA table_info(guild_knowledge_sources)")
+  .all() as Array<{ name: string }>;
+if (!guildKnowledgeColumns.some((column) => column.name === "clone_path")) {
+  db.exec("ALTER TABLE guild_knowledge_sources ADD COLUMN clone_path TEXT NOT NULL DEFAULT ''");
+}
+if (!guildKnowledgeColumns.some((column) => column.name === "vector_collection")) {
+  db.exec("ALTER TABLE guild_knowledge_sources ADD COLUMN vector_collection TEXT");
+}
+if (!guildKnowledgeColumns.some((column) => column.name === "indexed_at")) {
+  db.exec("ALTER TABLE guild_knowledge_sources ADD COLUMN indexed_at TEXT");
+}
+if (!guildKnowledgeColumns.some((column) => column.name === "indexed_markdown_files")) {
+  db.exec("ALTER TABLE guild_knowledge_sources ADD COLUMN indexed_markdown_files INTEGER NOT NULL DEFAULT 0");
+}
+if (!guildKnowledgeColumns.some((column) => column.name === "indexed_chunks")) {
+  db.exec("ALTER TABLE guild_knowledge_sources ADD COLUMN indexed_chunks INTEGER NOT NULL DEFAULT 0");
+}
+if (!guildKnowledgeColumns.some((column) => column.name === "markdown_signature")) {
+  db.exec("ALTER TABLE guild_knowledge_sources ADD COLUMN markdown_signature TEXT");
+}
+if (!guildKnowledgeColumns.some((column) => column.name === "markdown_manifest")) {
+  db.exec("ALTER TABLE guild_knowledge_sources ADD COLUMN markdown_manifest TEXT");
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS reminders (
@@ -267,6 +338,108 @@ export function setDesiredRunning(platform: string, desiredRunning: boolean) {
         updated_at = excluded.updated_at
     `,
   ).run(platform, desiredRunning ? 1 : 0, new Date().toISOString());
+}
+
+export function getSlackWorkspaceSettings() {
+  return db
+    .prepare(
+      `
+        SELECT workspace_id, workspace_name, workspace_domain, bot_token, app_token, enabled, desired_running, bot_user_id, bot_name, created_at, updated_at
+        FROM slack_workspace_settings
+        ORDER BY workspace_name COLLATE NOCASE, workspace_id
+      `,
+    )
+    .all() as SlackWorkspaceSettingsRow[];
+}
+
+export function getSlackWorkspaceSetting(workspaceId: string) {
+  return db
+    .prepare(
+      `
+        SELECT workspace_id, workspace_name, workspace_domain, bot_token, app_token, enabled, desired_running, bot_user_id, bot_name, created_at, updated_at
+        FROM slack_workspace_settings
+        WHERE workspace_id = ?
+      `,
+    )
+    .get(workspaceId) as SlackWorkspaceSettingsRow | undefined;
+}
+
+export function saveSlackWorkspaceSetting(input: {
+  workspaceId: string;
+  workspaceName?: string | null;
+  workspaceDomain?: string | null;
+  botToken: string;
+  appToken: string;
+  enabled: boolean;
+  desiredRunning?: boolean;
+  botUserId?: string | null;
+  botName?: string | null;
+}) {
+  const existing = getSlackWorkspaceSetting(input.workspaceId);
+  const now = new Date().toISOString();
+  const botToken = input.botToken.trim() || existing?.bot_token || null;
+  const appToken = input.appToken.trim() || existing?.app_token || null;
+  const desiredRunning = input.desiredRunning ?? Boolean(existing?.desired_running);
+
+  db.prepare(
+    `
+      INSERT INTO slack_workspace_settings (
+        workspace_id,
+        workspace_name,
+        workspace_domain,
+        bot_token,
+        app_token,
+        enabled,
+        desired_running,
+        bot_user_id,
+        bot_name,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(workspace_id) DO UPDATE SET
+        workspace_name = excluded.workspace_name,
+        workspace_domain = excluded.workspace_domain,
+        bot_token = excluded.bot_token,
+        app_token = excluded.app_token,
+        enabled = excluded.enabled,
+        desired_running = excluded.desired_running,
+        bot_user_id = excluded.bot_user_id,
+        bot_name = excluded.bot_name,
+        updated_at = excluded.updated_at
+    `,
+  ).run(
+    input.workspaceId,
+    input.workspaceName ?? existing?.workspace_name ?? null,
+    input.workspaceDomain ?? existing?.workspace_domain ?? null,
+    botToken,
+    appToken,
+    input.enabled ? 1 : 0,
+    desiredRunning ? 1 : 0,
+    input.botUserId ?? existing?.bot_user_id ?? null,
+    input.botName ?? existing?.bot_name ?? null,
+    existing?.created_at ?? now,
+    now,
+  );
+
+  return getSlackWorkspaceSetting(input.workspaceId);
+}
+
+export function setSlackWorkspaceDesiredRunning(workspaceId: string, desiredRunning: boolean) {
+  db.prepare(
+    `
+      UPDATE slack_workspace_settings
+      SET desired_running = ?, updated_at = ?
+      WHERE workspace_id = ?
+    `,
+  ).run(desiredRunning ? 1 : 0, new Date().toISOString(), workspaceId);
+
+  return getSlackWorkspaceSetting(workspaceId);
+}
+
+export function deleteSlackWorkspaceSetting(workspaceId: string) {
+  db.prepare("DELETE FROM slack_workspace_settings WHERE workspace_id = ?").run(workspaceId);
+  return getSlackWorkspaceSettings();
 }
 
 function getAgentConfigByKey(key: string, fallback?: AgentConfig): AgentConfig {
@@ -386,7 +559,7 @@ export function getGuildKnowledgeSources(guildId: string): GuildKnowledgeSource[
   const rows = db
     .prepare(
       `
-        SELECT id, repo_full_name, clone_path, indexed_at
+        SELECT id, guild_id, repo_full_name, repo_ssh_url, repo_html_url, clone_path, vector_collection, indexed_at, indexed_markdown_files, indexed_chunks, markdown_signature, markdown_manifest
         FROM guild_knowledge_sources
         WHERE guild_id = ? AND platform = ? AND clone_path != ''
         ORDER BY created_at DESC
@@ -394,17 +567,159 @@ export function getGuildKnowledgeSources(guildId: string): GuildKnowledgeSource[
     )
     .all(guildId, "github") as Array<{
     id: number;
+    guild_id: string;
     repo_full_name: string;
+    repo_ssh_url: string;
+    repo_html_url: string;
     clone_path: string;
+    vector_collection: string | null;
     indexed_at: string | null;
+    indexed_markdown_files: number;
+    indexed_chunks: number;
+    markdown_signature: string | null;
+    markdown_manifest: string | null;
   }>;
 
   return rows.map((row) => ({
     id: row.id,
+    guildId: row.guild_id,
     repoFullName: row.repo_full_name,
+    repoSshUrl: row.repo_ssh_url,
+    repoHtmlUrl: row.repo_html_url,
     clonePath: row.clone_path,
+    vectorCollection: row.vector_collection,
     indexedAt: row.indexed_at,
+    indexedMarkdownFiles: row.indexed_markdown_files,
+    indexedChunks: row.indexed_chunks,
+    markdownSignature: row.markdown_signature,
+    markdownManifest: row.markdown_manifest,
   }));
+}
+
+export function getAllGithubKnowledgeSources(): GuildKnowledgeSource[] {
+  const rows = db
+    .prepare(
+      `
+        SELECT id, guild_id, repo_full_name, repo_ssh_url, repo_html_url, clone_path, vector_collection, indexed_at, indexed_markdown_files, indexed_chunks, markdown_signature, markdown_manifest
+        FROM guild_knowledge_sources
+        WHERE platform = ?
+        ORDER BY guild_id, created_at DESC
+      `,
+    )
+    .all("github") as Array<{
+    id: number;
+    guild_id: string;
+    repo_full_name: string;
+    repo_ssh_url: string;
+    repo_html_url: string;
+    clone_path: string;
+    vector_collection: string | null;
+    indexed_at: string | null;
+    indexed_markdown_files: number;
+    indexed_chunks: number;
+    markdown_signature: string | null;
+    markdown_manifest: string | null;
+  }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    guildId: row.guild_id,
+    repoFullName: row.repo_full_name,
+    repoSshUrl: row.repo_ssh_url,
+    repoHtmlUrl: row.repo_html_url,
+    clonePath: row.clone_path,
+    vectorCollection: row.vector_collection,
+    indexedAt: row.indexed_at,
+    indexedMarkdownFiles: row.indexed_markdown_files,
+    indexedChunks: row.indexed_chunks,
+    markdownSignature: row.markdown_signature,
+    markdownManifest: row.markdown_manifest,
+  }));
+}
+
+export function updateGuildKnowledgeClonePath(input: {
+  guildId: string;
+  sourceId: number;
+  clonePath: string;
+}) {
+  db.prepare(
+    `
+      UPDATE guild_knowledge_sources
+      SET clone_path = ?
+      WHERE guild_id = ? AND id = ?
+    `,
+  ).run(input.clonePath, input.guildId, input.sourceId);
+}
+
+export function updateGuildKnowledgeIndexMetadata(input: {
+  guildId: string;
+  sourceId: number;
+  vectorCollection: string;
+  indexedMarkdownFiles: number;
+  indexedChunks: number;
+  markdownSignature: string;
+  markdownManifest: string;
+  indexedAt?: string;
+}) {
+  db.prepare(
+    `
+      UPDATE guild_knowledge_sources
+      SET
+        vector_collection = ?,
+        indexed_at = ?,
+        indexed_markdown_files = ?,
+        indexed_chunks = ?,
+        markdown_signature = ?,
+        markdown_manifest = ?
+      WHERE guild_id = ? AND id = ?
+    `,
+  ).run(
+    input.vectorCollection,
+    input.indexedAt ?? new Date().toISOString(),
+    input.indexedMarkdownFiles,
+    input.indexedChunks,
+    input.markdownSignature,
+    input.markdownManifest,
+    input.guildId,
+    input.sourceId,
+  );
+}
+
+export function updateGuildKnowledgeMarkdownSnapshot(input: {
+  guildId: string;
+  sourceId: number;
+  markdownSignature: string;
+  markdownManifest: string;
+  clonePath?: string;
+}) {
+  db.prepare(
+    `
+      UPDATE guild_knowledge_sources
+      SET
+        clone_path = COALESCE(?, clone_path),
+        markdown_signature = ?,
+        markdown_manifest = ?
+      WHERE guild_id = ? AND id = ?
+    `,
+  ).run(
+    input.clonePath ?? null,
+    input.markdownSignature,
+    input.markdownManifest,
+    input.guildId,
+    input.sourceId,
+  );
+}
+
+export function getGithubSshKeyMetadata() {
+  const row = db
+    .prepare("SELECT value FROM agent_settings WHERE key = ?")
+    .get("github_ssh_key") as { value: string } | undefined;
+
+  if (!row) {
+    return null;
+  }
+
+  return JSON.parse(row.value) as GithubSshKeyMetadata;
 }
 
 function toDiscordChannelMessage(row: {
@@ -519,7 +834,7 @@ export function saveSlackChannelMessage(input: {
   content: string;
   sentAt: string;
 }) {
-  db.prepare(
+  return db.prepare(
     `
       INSERT OR IGNORE INTO slack_channel_messages (
         workspace_id,

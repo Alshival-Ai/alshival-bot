@@ -9,6 +9,7 @@ import {
 } from "@/lib/db";
 import { cloneOrUpdateRepo, deleteRepoClone } from "@/lib/repoClones";
 import { deleteRepositoryVectors, indexRepositoryMarkdown } from "@/lib/vectorIndex";
+import { normalizeGithubRemoteOrigin } from "@/lib/githubRemote";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,34 +29,52 @@ export async function POST(request: NextRequest, context: RouteContext) {
     repoFullName?: unknown;
     repoSshUrl?: unknown;
     repoHtmlUrl?: unknown;
+    remoteOrigin?: unknown;
     private?: unknown;
   };
+  let repo: ReturnType<typeof normalizeGithubRemoteOrigin> | null = null;
 
-  if (
-    typeof body.repoFullName !== "string" ||
-    typeof body.repoSshUrl !== "string" ||
-    typeof body.repoHtmlUrl !== "string"
-  ) {
+  try {
+    repo =
+      typeof body.remoteOrigin === "string" && body.remoteOrigin.trim()
+        ? normalizeGithubRemoteOrigin(body.remoteOrigin)
+        : typeof body.repoFullName === "string" &&
+            typeof body.repoSshUrl === "string" &&
+            typeof body.repoHtmlUrl === "string"
+          ? {
+              repoFullName: body.repoFullName,
+              repoSshUrl: body.repoSshUrl,
+              repoHtmlUrl: body.repoHtmlUrl,
+            }
+          : null;
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Invalid GitHub remote origin." },
+      { status: 400 },
+    );
+  }
+
+  if (!repo) {
     return NextResponse.json({ error: "Invalid GitHub repo knowledge source." }, { status: 400 });
   }
 
   try {
     const clonePath = await cloneOrUpdateRepo({
       guildId: workspaceId,
-      repoFullName: body.repoFullName,
-      repoSshUrl: body.repoSshUrl,
+      repoFullName: repo.repoFullName,
+      repoSshUrl: repo.repoSshUrl,
       platform: "slack",
     });
 
     addGuildKnowledgeSource({
       guildId: workspaceId,
-      repoFullName: body.repoFullName,
-      repoSshUrl: body.repoSshUrl,
-      repoHtmlUrl: body.repoHtmlUrl,
+      repoFullName: repo.repoFullName,
+      repoSshUrl: repo.repoSshUrl,
+      repoHtmlUrl: repo.repoHtmlUrl,
       clonePath,
-      private: body.private === true,
+      private: body.private === true || typeof body.remoteOrigin === "string",
     });
-    const source = getGuildKnowledgeSourceByRepo(workspaceId, body.repoFullName);
+    const source = getGuildKnowledgeSourceByRepo(workspaceId, repo.repoFullName);
 
     if (!source) {
       throw new Error("Could not save knowledge source metadata.");

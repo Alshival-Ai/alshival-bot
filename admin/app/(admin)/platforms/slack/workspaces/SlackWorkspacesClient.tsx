@@ -1,14 +1,20 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useMemo, useState } from "react";
-import { BookOpen, Bot, Building2, Plus, RefreshCw, RotateCcw, Save, Trash2 } from "lucide-react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { Bot, Building2, KeyRound, Plus, Power, RefreshCw, RotateCcw, Save, Trash2 } from "lucide-react";
 
 type SlackWorkspaceSummary = {
   id: string;
   name: string;
   domain: string | null;
   iconUrl: string | null;
+  enabled: boolean;
+  desiredRunning: boolean;
+  running: boolean;
+  ready: boolean;
+  botName: string | null;
+  error?: string;
 };
 
 type GithubRepoSummary = {
@@ -18,6 +24,7 @@ type GithubRepoSummary = {
   sshUrl: string;
   htmlUrl: string;
   updatedAt: string;
+  accessOrg: string;
 };
 
 type WorkspaceKnowledgeSource = {
@@ -46,14 +53,23 @@ export default function SlackWorkspacesClient() {
   const [knowledgeSources, setKnowledgeSources] = useState<WorkspaceKnowledgeSource[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const [selectedRepoFullName, setSelectedRepoFullName] = useState("");
+  const [knowledgeSourceMode, setKnowledgeSourceMode] = useState<"select" | "remote">("select");
+  const [remoteOrigin, setRemoteOrigin] = useState("");
   const [workspaceAgentProvider, setWorkspaceAgentProvider] = useState<Provider>("openai");
   const [workspaceAgentModel, setWorkspaceAgentModel] = useState("");
   const [workspaceAgentInstructions, setWorkspaceAgentInstructions] = useState("");
+  const [botToken, setBotToken] = useState("");
+  const [appToken, setAppToken] = useState("");
+  const [connectionEnabled, setConnectionEnabled] = useState(true);
   const [status, setStatus] = useState("Loading workspaces...");
+  const [connectionStatus, setConnectionStatus] = useState("Add a Slack workspace connection.");
+  const [runtimeStatus, setRuntimeStatus] = useState("Select a workspace to manage its Slack runtime.");
   const [workspaceAgentStatus, setWorkspaceAgentStatus] = useState("Select a workspace to manage agent overrides.");
   const [historyStatus, setHistoryStatus] = useState("Clear stored memory for this workspace when needed.");
   const [knowledgeStatus, setKnowledgeStatus] = useState("Select a workspace to manage knowledge.");
   const [isLoading, setIsLoading] = useState(true);
+  const [isConnectionSaving, setIsConnectionSaving] = useState(false);
+  const [isRuntimeUpdating, setIsRuntimeUpdating] = useState(false);
   const [isWorkspaceAgentSaving, setIsWorkspaceAgentSaving] = useState(false);
   const [isHistoryClearing, setIsHistoryClearing] = useState(false);
   const [isKnowledgeLoading, setIsKnowledgeLoading] = useState(false);
@@ -108,6 +124,143 @@ export default function SlackWorkspacesClient() {
     }
 
     setRepos(data.repos ?? []);
+  }
+
+  async function saveWorkspaceConnection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsConnectionSaving(true);
+    setConnectionStatus("Saving Slack workspace connection...");
+
+    try {
+      const response = await fetch("/api/platforms/slack/workspaces", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          botToken,
+          appToken,
+          enabled: connectionEnabled,
+          start: true,
+        }),
+      });
+      const data = (await response.json()) as {
+        workspace?: { workspaceId: string; workspaceName: string | null };
+        workspaces?: SlackWorkspaceSummary[];
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not save Slack workspace connection.");
+      }
+
+      setBotToken("");
+      setAppToken("");
+      setWorkspaces(data.workspaces ?? []);
+      setSelectedWorkspaceId(data.workspace?.workspaceId ?? data.workspaces?.[0]?.id ?? null);
+      setRuntimeStatus("Slack workspace connection saved.");
+      setConnectionStatus(
+        data.workspace?.workspaceName
+          ? `${data.workspace.workspaceName} connected.`
+          : "Slack workspace connected.",
+      );
+    } catch (error) {
+      setConnectionStatus(error instanceof Error ? error.message : "Could not save Slack workspace connection.");
+    } finally {
+      setIsConnectionSaving(false);
+    }
+  }
+
+  async function updateWorkspaceRuntime(action: "start" | "stop") {
+    if (!selectedWorkspace) {
+      return;
+    }
+
+    setIsRuntimeUpdating(true);
+    setRuntimeStatus(action === "start" ? "Starting Slack workspace..." : "Stopping Slack workspace...");
+
+    try {
+      const response = await fetch(`/api/platforms/slack/workspaces/${selectedWorkspace.id}/runtime`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = (await response.json()) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not update Slack workspace runtime.");
+      }
+
+      await loadWorkspaces();
+      setRuntimeStatus(action === "start" ? "Slack workspace started." : "Slack workspace stopped.");
+    } catch (error) {
+      setRuntimeStatus(error instanceof Error ? error.message : "Could not update Slack workspace runtime.");
+    } finally {
+      setIsRuntimeUpdating(false);
+    }
+  }
+
+  async function updateWorkspaceEnabled(enabled: boolean) {
+    if (!selectedWorkspace) {
+      return;
+    }
+
+    setIsRuntimeUpdating(true);
+    setRuntimeStatus(enabled ? "Enabling Slack workspace..." : "Disabling Slack workspace...");
+
+    try {
+      const response = await fetch(`/api/platforms/slack/workspaces/${selectedWorkspace.id}/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = (await response.json()) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not update Slack workspace settings.");
+      }
+
+      await loadWorkspaces();
+      setRuntimeStatus(enabled ? "Slack workspace enabled." : "Slack workspace disabled.");
+    } catch (error) {
+      setRuntimeStatus(error instanceof Error ? error.message : "Could not update Slack workspace settings.");
+    } finally {
+      setIsRuntimeUpdating(false);
+    }
+  }
+
+  async function deleteWorkspaceConnection() {
+    if (!selectedWorkspace) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete the Slack connection for ${selectedWorkspace.name}? Tokens and runtime state will be removed.`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsRuntimeUpdating(true);
+    setRuntimeStatus("Deleting Slack workspace connection...");
+
+    try {
+      const response = await fetch(`/api/platforms/slack/workspaces/${selectedWorkspace.id}/settings`, {
+        method: "DELETE",
+      });
+      const data = (await response.json()) as { error?: string };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not delete Slack workspace settings.");
+      }
+
+      setKnowledgeSources([]);
+      await loadWorkspaces();
+      setRuntimeStatus("Slack workspace connection deleted.");
+    } catch (error) {
+      setRuntimeStatus(error instanceof Error ? error.message : "Could not delete Slack workspace settings.");
+    } finally {
+      setIsRuntimeUpdating(false);
+    }
   }
 
   async function loadKnowledgeSources(workspaceId: string) {
@@ -268,13 +421,20 @@ export default function SlackWorkspacesClient() {
   }
 
   async function addKnowledgeSource() {
-    if (!selectedWorkspace || !selectedRepoFullName) {
+    if (!selectedWorkspace) {
       return;
     }
 
-    const repo = repos.find((candidate) => candidate.fullName === selectedRepoFullName);
+    const repo =
+      knowledgeSourceMode === "select"
+        ? repos.find((candidate) => candidate.fullName === selectedRepoFullName)
+        : null;
 
-    if (!repo) {
+    if (knowledgeSourceMode === "select" && !repo) {
+      return;
+    }
+
+    if (knowledgeSourceMode === "remote" && !remoteOrigin.trim()) {
       return;
     }
 
@@ -285,12 +445,19 @@ export default function SlackWorkspacesClient() {
       const response = await fetch(`/api/platforms/slack/workspaces/${selectedWorkspace.id}/knowledge`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          repoFullName: repo.fullName,
-          repoSshUrl: repo.sshUrl,
-          repoHtmlUrl: repo.htmlUrl,
-          private: repo.private,
-        }),
+        body: JSON.stringify(
+          repo
+            ? {
+                repoFullName: repo.fullName,
+                repoSshUrl: repo.sshUrl,
+                repoHtmlUrl: repo.htmlUrl,
+                private: repo.private,
+              }
+            : {
+                remoteOrigin,
+                private: true,
+              },
+        ),
       });
       const data = (await response.json()) as {
         sources?: WorkspaceKnowledgeSource[];
@@ -303,6 +470,7 @@ export default function SlackWorkspacesClient() {
 
       setKnowledgeSources(data.sources ?? []);
       setSelectedRepoFullName("");
+      setRemoteOrigin("");
       setKnowledgeStatus("Knowledge source added.");
     } catch (error) {
       setKnowledgeStatus(error instanceof Error ? error.message : "Could not add knowledge source.");
@@ -388,6 +556,51 @@ export default function SlackWorkspacesClient() {
             <Building2 size={21} />
           </div>
           <p className="status-copy">{status}</p>
+          <form className="settings-stack" onSubmit={saveWorkspaceConnection}>
+            <div className="connection-card">
+              <div>
+                <p className="eyebrow">Connection</p>
+                <h4>Add workspace</h4>
+              </div>
+              <label className="field">
+                <span>Bot token</span>
+                <input
+                  autoComplete="off"
+                  onChange={(event) => setBotToken(event.target.value)}
+                  placeholder="Paste xoxb bot token"
+                  type="password"
+                  value={botToken}
+                />
+              </label>
+              <label className="field">
+                <span>Socket Mode app token</span>
+                <input
+                  autoComplete="off"
+                  onChange={(event) => setAppToken(event.target.value)}
+                  placeholder="Paste xapp app-level token"
+                  type="password"
+                  value={appToken}
+                />
+              </label>
+              <label className="toggle-row">
+                <input
+                  checked={connectionEnabled}
+                  onChange={(event) => setConnectionEnabled(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Enable this workspace</span>
+              </label>
+              <button
+                className="primary-action fit-content"
+                disabled={isConnectionSaving || !botToken.trim() || !appToken.trim()}
+                type="submit"
+              >
+                <KeyRound size={17} />
+                {isConnectionSaving ? "Saving..." : "Save workspace"}
+              </button>
+              <p className="status-copy">{connectionStatus}</p>
+            </div>
+          </form>
           <div className="guild-list">
             {workspaces.map((workspace) => (
               <button
@@ -410,7 +623,14 @@ export default function SlackWorkspacesClient() {
                 )}
                 <span>
                   <strong>{workspace.name}</strong>
-                  <small>{workspace.domain ?? workspace.id}</small>
+                  <small>
+                    {workspace.ready
+                      ? "Running"
+                      : workspace.enabled
+                        ? "Stopped"
+                        : "Disabled"}{" "}
+                    · {workspace.domain ?? workspace.id}
+                  </small>
                 </span>
               </button>
             ))}
@@ -427,6 +647,65 @@ export default function SlackWorkspacesClient() {
           </div>
 
           <div className="settings-stack">
+            <div className="connection-card">
+              <div>
+                <p className="eyebrow">Connection</p>
+                <h4>
+                  {selectedWorkspace?.ready
+                    ? "Running"
+                    : selectedWorkspace?.enabled
+                      ? "Stopped"
+                      : selectedWorkspace
+                        ? "Disabled"
+                        : "No workspace selected"}
+                </h4>
+              </div>
+              <p className="placeholder-copy">
+                {selectedWorkspace?.botName
+                  ? `Bot user: ${selectedWorkspace.botName}`
+                  : selectedWorkspace?.error ?? "Manage this workspace's Slack app connection."}
+              </p>
+              <div className="button-row">
+                <button
+                  className="primary-action fit-content"
+                  disabled={!selectedWorkspace || !selectedWorkspace.enabled || selectedWorkspace.ready || isRuntimeUpdating}
+                  onClick={() => void updateWorkspaceRuntime("start")}
+                  type="button"
+                >
+                  <Power size={17} />
+                  Start
+                </button>
+                <button
+                  className="secondary-action fit-content"
+                  disabled={!selectedWorkspace || !selectedWorkspace.running || isRuntimeUpdating}
+                  onClick={() => void updateWorkspaceRuntime("stop")}
+                  type="button"
+                >
+                  <Power size={17} />
+                  Stop
+                </button>
+                <button
+                  className="secondary-action fit-content"
+                  disabled={!selectedWorkspace || isRuntimeUpdating}
+                  onClick={() => void updateWorkspaceEnabled(!selectedWorkspace.enabled)}
+                  type="button"
+                >
+                  <KeyRound size={17} />
+                  {selectedWorkspace?.enabled ? "Disable" : "Enable"}
+                </button>
+                <button
+                  className="secondary-action fit-content"
+                  disabled={!selectedWorkspace || isRuntimeUpdating}
+                  onClick={() => void deleteWorkspaceConnection()}
+                  type="button"
+                >
+                  <Trash2 size={17} />
+                  Delete
+                </button>
+              </div>
+              <p className="status-copy">{runtimeStatus}</p>
+            </div>
+
             <div className="connection-card">
               <div>
                 <p className="eyebrow">Agent override</p>
@@ -504,42 +783,76 @@ export default function SlackWorkspacesClient() {
                 <h4>GitHub sources</h4>
               </div>
               <label className="field">
-                <span>Repository</span>
+                <span>Source</span>
                 <select
                   disabled={!selectedWorkspace || isKnowledgeLoading}
-                  onChange={(event) => setSelectedRepoFullName(event.target.value)}
-                  value={selectedRepoFullName}
+                  onChange={(event) => setKnowledgeSourceMode(event.target.value as "select" | "remote")}
+                  value={knowledgeSourceMode}
                 >
-                  <option value="">Select a repository</option>
-                  {repos.map((repo) => (
-                    <option key={repo.id} value={repo.fullName}>
-                      {repo.fullName}
-                    </option>
-                  ))}
+                  <option value="select">Select a repository</option>
+                  <option value="remote">Add remote origin</option>
                 </select>
               </label>
+              {knowledgeSourceMode === "select" ? (
+                <label className="field">
+                  <span>Repository</span>
+                  <select
+                    disabled={!selectedWorkspace || isKnowledgeLoading}
+                    onChange={(event) => setSelectedRepoFullName(event.target.value)}
+                    value={selectedRepoFullName}
+                  >
+                    <option value="">Select a repository</option>
+                    {repos.map((repo) => (
+                      <option key={repo.id} value={repo.fullName}>
+                        {repo.fullName} · {repo.accessOrg}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <label className="field">
+                  <span>Remote origin</span>
+                  <input
+                    disabled={!selectedWorkspace || isKnowledgeLoading}
+                    onChange={(event) => setRemoteOrigin(event.target.value)}
+                    placeholder="https://github.com/org/repo.git"
+                    value={remoteOrigin}
+                  />
+                </label>
+              )}
               <button
                 className="primary-action fit-content"
-                disabled={!selectedWorkspace || !selectedRepoFullName || isKnowledgeLoading}
+                disabled={
+                  !selectedWorkspace ||
+                  isKnowledgeLoading ||
+                  (knowledgeSourceMode === "select"
+                    ? !selectedRepoFullName
+                    : remoteOrigin.trim().length === 0)
+                }
                 onClick={() => void addKnowledgeSource()}
                 type="button"
               >
                 <Plus size={17} />
                 Add source
               </button>
+              {knowledgeSourceMode === "remote" ? (
+                <p className="status-copy">
+                  Remote origins are normalized to SSH and cloned with the configured GitHub SSH key.
+                </p>
+              ) : null}
               <p className="status-copy">{knowledgeStatus}</p>
-              <div className="source-list">
+              <div className="knowledge-source-list">
                 {knowledgeSources.map((source) => (
-                  <div className="source-row" key={source.id}>
-                    <BookOpen size={17} />
+                  <div className="knowledge-source-row" key={source.id}>
                     <span>{source.repoFullName}</span>
                     <button
-                      className="icon-button"
+                      className="secondary-action fit-content"
                       disabled={isKnowledgeLoading}
                       onClick={() => void removeKnowledgeSource(source.id)}
                       type="button"
                     >
                       <Trash2 size={16} />
+                      Remove
                     </button>
                   </div>
                 ))}
