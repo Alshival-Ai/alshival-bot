@@ -26,7 +26,11 @@ const embeddingModel = "nomic-ai/nomic-embed-text-v1.5";
 const embeddingPrefix = "search_document";
 const embeddingQuantized = process.env.EMBEDDING_QUANTIZED !== "false";
 
-function getGuildCollectionName(guildId: string) {
+function getGuildCollectionName(guildId: string, platform: "discord" | "slack" = "discord") {
+  if (platform === "slack") {
+    return `slack_workspace_${guildId}`;
+  }
+
   return `discord_guild_${guildId}`;
 }
 
@@ -145,14 +149,18 @@ export async function indexRepositoryMarkdown(input: {
   sourceId: number;
   repoFullName: string;
   clonePath: string;
+  platform?: "discord" | "slack";
 }) {
-  const collectionName = getGuildCollectionName(input.guildId);
+  const platform = input.platform ?? "discord";
+  const collectionName = getGuildCollectionName(input.guildId, platform);
   const client = new ChromaClient({ host: chromaHost, port: chromaPort });
   const collection = await client.getOrCreateCollection({
     name: collectionName,
     metadata: {
-      platform: "discord",
+      platform,
+      contextPlatform: platform,
       guildId: input.guildId,
+      workspaceId: platform === "slack" ? input.guildId : "",
       embeddingModel,
       embeddingPrefix,
       embeddingQuantized: String(embeddingQuantized),
@@ -181,7 +189,9 @@ export async function indexRepositoryMarkdown(input: {
       embeddings: await embedTexts(batch.map((chunk) => chunk.text)),
       metadatas: batch.map((chunk) => ({
         platform: "github",
+        contextPlatform: platform,
         guildId: input.guildId,
+        workspaceId: platform === "slack" ? input.guildId : "",
         sourceId: input.sourceId,
         repoFullName: input.repoFullName,
         relativePath: chunk.relativePath,
@@ -203,10 +213,11 @@ export async function indexRepositoryMarkdown(input: {
 export async function deleteRepositoryVectors(input: {
   guildId: string;
   sourceId: number;
+  platform?: "discord" | "slack";
 }) {
   const client = new ChromaClient({ host: chromaHost, port: chromaPort });
   const collection = await client.getOrCreateCollection({
-    name: getGuildCollectionName(input.guildId),
+    name: getGuildCollectionName(input.guildId, input.platform ?? "discord"),
     embeddingFunction: null,
   });
 

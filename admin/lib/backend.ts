@@ -20,6 +20,21 @@ export type DiscordGuildSummary = {
   ownerId: string | null;
 };
 
+export type SlackWorkspaceSummary = {
+  id: string;
+  name: string;
+  domain: string | null;
+  iconUrl: string | null;
+};
+
+export type SlackChannelSummary = {
+  id: string;
+  name: string;
+  isPrivate: boolean;
+  isArchived: boolean;
+  memberCount: number | null;
+};
+
 export type AgentResponse = {
   provider: string;
   model: string;
@@ -79,6 +94,15 @@ export async function stopPlatform(platform: string) {
 
 export async function getDiscordGuilds() {
   return requestBackendJson<{ guilds: DiscordGuildSummary[] }>("/platforms/discord/guilds");
+}
+
+export async function getSlackWorkspaces() {
+  return requestBackendJson<{ workspaces: SlackWorkspaceSummary[] }>("/platforms/slack/workspaces");
+}
+
+export async function getSlackChannels(workspaceId?: string) {
+  const params = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : "";
+  return requestBackendJson<{ channels: SlackChannelSummary[] }>(`/platforms/slack/channels${params}`);
 }
 
 export async function generateAgentResponse(input: string) {

@@ -7,7 +7,10 @@ import { getGithubSshKeyMetadata } from "@/lib/db";
 const execFileAsync = promisify(execFile);
 
 const agentHome = process.env.AGENT_HOME ?? path.dirname(process.env.BOT_DB_PATH ?? path.join(process.cwd(), "bot.db"));
-const guildRoot = path.join(agentHome, "platform", "Discord", "Guilds");
+const platformRoots = {
+  discord: path.join(agentHome, "platform", "Discord", "Guilds"),
+  slack: path.join(agentHome, "platform", "Slack", "Workspaces"),
+};
 
 function assertSafeId(value: string, label: string) {
   if (!/^[A-Za-z0-9_.-]+$/.test(value)) {
@@ -45,17 +48,18 @@ async function pathExists(targetPath: string) {
   }
 }
 
-export function getGuildRepoClonePath(guildId: string, repoFullName: string) {
-  assertSafeId(guildId, "Discord guild ID");
-  return path.join(guildRoot, guildId, "Knowledge", "GitHub", repoDirectoryName(repoFullName));
+export function getGuildRepoClonePath(guildId: string, repoFullName: string, platform: "discord" | "slack" = "discord") {
+  assertSafeId(guildId, platform === "discord" ? "Discord guild ID" : "Slack workspace ID");
+  return path.join(platformRoots[platform], guildId, "Knowledge", "GitHub", repoDirectoryName(repoFullName));
 }
 
 export async function cloneOrUpdateRepo(input: {
   guildId: string;
   repoFullName: string;
   repoSshUrl: string;
+  platform?: "discord" | "slack";
 }) {
-  const clonePath = getGuildRepoClonePath(input.guildId, input.repoFullName);
+  const clonePath = getGuildRepoClonePath(input.guildId, input.repoFullName, input.platform ?? "discord");
   const parentPath = path.dirname(clonePath);
   const sshCommand = getSshCommand();
 
@@ -92,10 +96,10 @@ export async function cloneOrUpdateRepo(input: {
 
 export async function deleteRepoClone(clonePath: string) {
   const resolvedClonePath = path.resolve(clonePath);
-  const resolvedGuildRoot = path.resolve(guildRoot);
+  const allowedRoots = Object.values(platformRoots).map((root) => path.resolve(root));
 
-  if (!resolvedClonePath.startsWith(`${resolvedGuildRoot}${path.sep}`)) {
-    throw new Error("Refusing to delete a path outside the guild knowledge directory.");
+  if (!allowedRoots.some((root) => resolvedClonePath.startsWith(`${root}${path.sep}`))) {
+    throw new Error("Refusing to delete a path outside the platform knowledge directory.");
   }
 
   await fs.rm(resolvedClonePath, { force: true, recursive: true });

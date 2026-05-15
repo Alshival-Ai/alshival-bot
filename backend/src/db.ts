@@ -4,6 +4,7 @@ import path from "node:path";
 export type PlatformSettingsRow = {
   platform: string;
   bot_token: string | null;
+  app_token: string | null;
   enabled: 0 | 1;
   desired_running: 0 | 1;
   updated_at: string | null;
@@ -32,6 +33,22 @@ export type DiscordChannelMessage = {
   channelId: string;
   messageId: string;
   role: DiscordChannelMessageRole;
+  authorId: string;
+  authorUsername: string;
+  authorDisplayName: string;
+  authorMention: string;
+  content: string;
+  sentAt: string;
+  createdAt: string;
+};
+
+export type SlackChannelMessageRole = "user" | "assistant";
+
+export type SlackChannelMessage = {
+  workspaceId: string;
+  channelId: string;
+  messageId: string;
+  role: SlackChannelMessageRole;
   authorId: string;
   authorUsername: string;
   authorDisplayName: string;
@@ -84,6 +101,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS platform_settings (
     platform TEXT PRIMARY KEY,
     bot_token TEXT,
+    app_token TEXT,
     enabled INTEGER NOT NULL DEFAULT 0,
     desired_running INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT
@@ -116,8 +134,30 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS slack_channel_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL,
+    author_id TEXT NOT NULL,
+    author_username TEXT NOT NULL,
+    author_display_name TEXT NOT NULL,
+    author_mention TEXT NOT NULL,
+    content TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )
+`);
+
+db.exec(`
   CREATE INDEX IF NOT EXISTS idx_discord_channel_messages_channel_sent
   ON discord_channel_messages (guild_id, channel_id, sent_at, id)
+`);
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_slack_channel_messages_channel_sent
+  ON slack_channel_messages (workspace_id, channel_id, sent_at, id)
 `);
 
 db.exec(`
@@ -166,6 +206,9 @@ const columns = db.prepare("PRAGMA table_info(platform_settings)").all() as Arra
 if (!columns.some((column) => column.name === "desired_running")) {
   db.exec("ALTER TABLE platform_settings ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0");
 }
+if (!columns.some((column) => column.name === "app_token")) {
+  db.exec("ALTER TABLE platform_settings ADD COLUMN app_token TEXT");
+}
 
 function isLanguageModelProvider(value: unknown): value is LanguageModelProvider {
   return value === "openai" || value === "anthropic";
@@ -209,7 +252,7 @@ function toReminder(row: {
 export function getPlatformSettings(platform: string) {
   return db
     .prepare(
-      "SELECT platform, bot_token, enabled, desired_running, updated_at FROM platform_settings WHERE platform = ?",
+      "SELECT platform, bot_token, app_token, enabled, desired_running, updated_at FROM platform_settings WHERE platform = ?",
     )
     .get(platform) as PlatformSettingsRow | undefined;
 }
@@ -262,6 +305,10 @@ export function resolveAgentConfig(input?: { source?: string; guildId?: string }
 
   if (input?.source === "discord" && input.guildId) {
     return getAgentConfigByKey(`discord_guild_agent_config:${input.guildId}`, defaultConfig);
+  }
+
+  if (input?.source === "slack" && input.guildId) {
+    return getAgentConfigByKey(`slack_workspace_agent_config:${input.guildId}`, defaultConfig);
   }
 
   return defaultConfig;
@@ -432,6 +479,78 @@ export function saveDiscordChannelMessage(input: {
   );
 }
 
+function toSlackChannelMessage(row: {
+  workspace_id: string;
+  channel_id: string;
+  message_id: string;
+  role: string;
+  author_id: string;
+  author_username: string;
+  author_display_name: string;
+  author_mention: string;
+  content: string;
+  sent_at: string;
+  created_at: string;
+}): SlackChannelMessage {
+  return {
+    workspaceId: row.workspace_id,
+    channelId: row.channel_id,
+    messageId: row.message_id,
+    role: row.role === "assistant" ? "assistant" : "user",
+    authorId: row.author_id,
+    authorUsername: row.author_username,
+    authorDisplayName: row.author_display_name,
+    authorMention: row.author_mention,
+    content: row.content,
+    sentAt: row.sent_at,
+    createdAt: row.created_at,
+  };
+}
+
+export function saveSlackChannelMessage(input: {
+  workspaceId: string;
+  channelId: string;
+  messageId: string;
+  role: SlackChannelMessageRole;
+  authorId: string;
+  authorUsername: string;
+  authorDisplayName: string;
+  authorMention: string;
+  content: string;
+  sentAt: string;
+}) {
+  db.prepare(
+    `
+      INSERT OR IGNORE INTO slack_channel_messages (
+        workspace_id,
+        channel_id,
+        message_id,
+        role,
+        author_id,
+        author_username,
+        author_display_name,
+        author_mention,
+        content,
+        sent_at,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    input.workspaceId,
+    input.channelId,
+    input.messageId,
+    input.role,
+    input.authorId,
+    input.authorUsername,
+    input.authorDisplayName,
+    input.authorMention,
+    input.content,
+    input.sentAt,
+    new Date().toISOString(),
+  );
+}
+
 export function getDiscordChannelHistory(input: {
   guildId: string;
   channelId: string;
@@ -463,6 +582,39 @@ export function getDiscordChannelHistory(input: {
   >[0][];
 
   return rows.map(toDiscordChannelMessage).reverse();
+}
+
+export function getSlackChannelHistory(input: {
+  workspaceId: string;
+  channelId: string;
+  limit: number;
+}) {
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          workspace_id,
+          channel_id,
+          message_id,
+          role,
+          author_id,
+          author_username,
+          author_display_name,
+          author_mention,
+          content,
+          sent_at,
+          created_at
+        FROM slack_channel_messages
+        WHERE workspace_id = ? AND channel_id = ?
+        ORDER BY sent_at DESC, id DESC
+        LIMIT ?
+      `,
+    )
+    .all(input.workspaceId, input.channelId, input.limit) as Parameters<
+    typeof toSlackChannelMessage
+  >[0][];
+
+  return rows.map(toSlackChannelMessage).reverse();
 }
 
 export function createReminder(input: {
@@ -578,6 +730,21 @@ export function getDueDiscordReminders(nowIso: string) {
       `,
     )
     .all("discord", "pending", nowIso) as Parameters<typeof toReminder>[0][];
+
+  return rows.map(toReminder);
+}
+
+export function getDueSlackReminders(nowIso: string) {
+  const rows = db
+    .prepare(
+      `
+        SELECT id, platform, guild_id, channel_id, author_id, author_mention, title, message, remind_at, status, created_at, updated_at, sent_at
+        FROM reminders
+        WHERE platform = ? AND status = ? AND remind_at <= ?
+        ORDER BY remind_at ASC, id ASC
+      `,
+    )
+    .all("slack", "pending", nowIso) as Parameters<typeof toReminder>[0][];
 
   return rows.map(toReminder);
 }

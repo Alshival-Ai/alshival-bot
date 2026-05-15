@@ -434,6 +434,12 @@ textarea {
   gap: 18px;
 }
 
+.guild-admin-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.2fr);
+  gap: 18px;
+}
+
 .guild-status {
   margin-bottom: 14px;
 }
@@ -505,9 +511,34 @@ img.guild-icon {
   font-size: 24px;
 }
 
+.guild-avatar {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--accent-gradient);
+  color: #ffffff;
+  font-weight: 900;
+}
+
 .guild-detail {
   display: grid;
   gap: 18px;
+}
+
+.workspace-detail-panel,
+.settings-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .guild-detail dl {
@@ -582,6 +613,48 @@ img.guild-icon {
   margin-top: 3px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.source-list,
+.list-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.source-row,
+.list-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcf8;
+  padding: 10px;
+}
+
+.list-card h4,
+.list-card p {
+  margin: 0;
+}
+
+.list-card p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.icon-button {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
 }
 
 .github-key-grid {
@@ -862,6 +935,7 @@ code {
 
   .panel-grid,
   .guild-admin-grid,
+  .guild-admin-layout,
   .github-key-grid,
   .agent-grid,
   .mcp-grid,

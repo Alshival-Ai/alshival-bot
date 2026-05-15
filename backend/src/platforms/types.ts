@@ -25,3 +25,18 @@ export type DiscordGuildSummary = {
   available: boolean;
   ownerId: string | null;
 };
+
+export type SlackWorkspaceSummary = {
+  id: string;
+  name: string;
+  domain: string | null;
+  iconUrl: string | null;
+};
+
+export type SlackChannelSummary = {
+  id: string;
+  name: string;
+  isPrivate: boolean;
+  isArchived: boolean;
+  memberCount: number | null;
+};

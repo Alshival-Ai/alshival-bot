@@ -28,15 +28,21 @@ The first supported platform is Discord. The bot listens for normal messages tha
 - Vector DB: ChromaDB in Docker
 - Embeddings: `nomic-ai/nomic-embed-text-v1.5`
 - Tools: local HTTP MCP-style server in `mcp/server.py`
-- Platforms: Discord now, with structure for additional platforms later
+- Platforms: Discord and Slack now, with structure for additional platforms later
+- Slack uses Socket Mode, so it can run from localhost or a Raspberry Pi without a public HTTPS callback URL
 
 ## Features
 
 - Configure Discord global settings and bot token
+- Configure Slack global settings, bot token, and Socket Mode app token
 - Start and stop the Discord bot from the admin panel
+- Start and stop the Slack bot from the admin panel
 - View Discord guilds and manage guild-specific settings
+- View Slack workspaces and channels
 - Override default agent provider/model per Discord guild
+- Override default agent provider/model per Slack workspace
 - Store chat history per Discord channel
+- Store chat history per Slack channel
 - Clear stored guild/channel chat history
 - Add GitHub repos as guild knowledge sources
 - Clone and delete guild-specific repo sources under `platform/Discord/Guilds/<guild-id>/`
@@ -144,6 +150,10 @@ The admin panel includes:
   - Discord
     - Global Settings
     - Guilds
+  - Slack
+    - Global Settings
+    - Workspaces
+    - Channels
   - GitHub
     - Global Settings
 
@@ -177,9 +187,55 @@ alshival
 
 It does not require slash commands or prefix commands.
 
+## Slack Setup
+
+Create a Slack app and enable Socket Mode. Socket Mode is used so Alshival can run from localhost, WSL, or the Raspberry Pi without exposing a public HTTPS events endpoint.
+
+Required app-level token scope:
+
+```text
+connections:write
+```
+
+Create an app-level token with that scope. It will start with:
+
+```text
+xapp-
+```
+
+Install the app to your workspace with a bot token that starts with:
+
+```text
+xoxb-
+```
+
+Recommended bot scopes:
+
+```text
+chat:write
+app_mentions:read
+channels:read
+channels:history
+groups:read
+groups:history
+users:read
+team:read
+```
+
+Subscribe the Slack app to message events you want Alshival to see, such as app mentions and channel/private-channel messages.
+
+The Slack bot responds when:
+
+```text
+alshival
+```
+
+appears in a message, or when the Slack bot is mentioned directly.
+
 ## GitHub Knowledge Sources
 
 GitHub sources are configured per Discord guild.
+For Slack, GitHub sources are configured per Slack workspace.
 
 When a repo is added as a guild knowledge source:
 
@@ -189,6 +245,12 @@ When a repo is added as a guild knowledge source:
 4. The agent can search the cloned codebase for deeper implementation details.
 
 When a source is removed, the corresponding local clone is deleted.
+
+Slack workspace knowledge sources are cloned under:
+
+```text
+platform/Slack/Workspaces/<workspace-id>/Knowledge/GitHub/
+```
 
 For private repos, configure GitHub access in the GitHub platform settings. A PAT with read-only repository access is enough for cloning and listing repos.
 
@@ -221,6 +283,7 @@ Current tools include:
 
 - GIF search
 - Discord guild knowledge search
+- Slack workspace knowledge search
 - Codebase search
 - Reminders
 

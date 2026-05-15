@@ -2,16 +2,18 @@ import {
   cancelReminder,
   createReminder,
   getDiscordChannelHistory,
+  getSlackChannelHistory,
   getGuildKnowledgeSources,
   getLanguageModelSettingsUnsafe,
   getMcpToolSettings,
   resolveAgentConfig,
   updateReminder,
   type DiscordChannelMessage,
+  type SlackChannelMessage,
 } from "./db.js";
-import { searchDiscordGuildCode } from "./codeSearch.js";
+import { searchDiscordGuildCode, searchSlackWorkspaceCode } from "./codeSearch.js";
 import { searchGif } from "./mcp.js";
-import { searchDiscordGuildKb } from "./vectorSearch.js";
+import { searchDiscordGuildKb, searchSlackWorkspaceKb } from "./vectorSearch.js";
 
 export type AgentResponseInput = {
   input: string;
@@ -260,6 +262,142 @@ function getEnabledOpenAiTools(input: AgentResponseInput) {
     );
   }
 
+  if (input.source === "slack" && input.guildId) {
+    const knowledgeSources = getGuildKnowledgeSources(input.guildId);
+
+    tools.push({
+      type: "function",
+      name: "slack_workspace_kb",
+      description:
+        "Search this Slack workspace's indexed knowledge base. Use this for workspace-specific docs, repositories, policies, project context, or saved knowledge sources.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Focused semantic search query for this Slack workspace's knowledge base.",
+          },
+          limit: {
+            type: "integer",
+            description: "Maximum number of knowledge chunks to return.",
+            minimum: 1,
+            maximum: 10,
+          },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      strict: false,
+    });
+
+    if (knowledgeSources.length > 0) {
+      tools.push({
+        type: "function",
+        name: "slack_workspace_code",
+        description:
+          "Search cloned GitHub repositories configured as knowledge sources for this Slack workspace. Use this when markdown KB results are insufficient, when implementation details are needed, or when exact code references are needed.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              description: "Exact code, identifier, function name, file name, or phrase to search for.",
+            },
+            repoFullName: {
+              type: "string",
+              description: "Optional GitHub repo full name to limit the search, like owner/repo.",
+            },
+            limit: {
+              type: "integer",
+              description: "Maximum number of matches to return.",
+              minimum: 1,
+              maximum: 50,
+            },
+          },
+          required: ["query"],
+          additionalProperties: false,
+        },
+        strict: false,
+      });
+    }
+
+    tools.push(
+      {
+        type: "function",
+        name: "set_reminder",
+        description:
+          "Create a reminder for the current conversation. For Slack, the reminder will be sent back to this same workspace and channel and mention the requesting user.",
+        parameters: {
+          type: "object",
+          properties: {
+            title: {
+              type: "string",
+              description: "Short reminder title.",
+            },
+            remindAt: {
+              type: "string",
+              description:
+                "Absolute ISO-8601 timestamp for when to send the reminder. Use the current timestamp from the prompt to resolve relative times.",
+            },
+            message: {
+              type: "string",
+              description: "Optional reminder body.",
+            },
+          },
+          required: ["title", "remindAt"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "edit_reminder",
+        description: "Edit an existing reminder by ID.",
+        parameters: {
+          type: "object",
+          properties: {
+            reminderId: {
+              type: "integer",
+              description: "Reminder ID.",
+            },
+            title: {
+              type: "string",
+              description: "New reminder title.",
+            },
+            remindAt: {
+              type: "string",
+              description: "New absolute ISO-8601 reminder time.",
+            },
+            message: {
+              type: "string",
+              description: "New reminder body.",
+            },
+          },
+          required: ["reminderId"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "delete_reminder",
+        description: "Cancel an existing reminder by ID.",
+        parameters: {
+          type: "object",
+          properties: {
+            reminderId: {
+              type: "integer",
+              description: "Reminder ID.",
+            },
+          },
+          required: ["reminderId"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+    );
+  }
+
   if (settings.gifSearch.enabled && settings.gifSearch.tenorApiKey) {
     tools.push({
       type: "function",
@@ -343,6 +481,36 @@ async function callTool(name: string, rawArguments: string, input: AgentResponse
         : {};
     return searchDiscordGuildCode({
       guildId: input.guildId,
+      query: typeof payload.query === "string" ? payload.query : "",
+      repoFullName: typeof payload.repoFullName === "string" ? payload.repoFullName : undefined,
+      limit: typeof payload.limit === "number" ? payload.limit : undefined,
+    });
+  }
+
+  if (name === "slack_workspace_kb") {
+    if (input.source !== "slack" || !input.guildId) {
+      throw new Error("slack_workspace_kb requires a Slack workspace context.");
+    }
+
+    const payload = args && typeof args === "object" ? (args as { query?: unknown; limit?: unknown }) : {};
+    return searchSlackWorkspaceKb({
+      workspaceId: input.guildId,
+      query: typeof payload.query === "string" ? payload.query : "",
+      limit: typeof payload.limit === "number" ? payload.limit : undefined,
+    });
+  }
+
+  if (name === "slack_workspace_code") {
+    if (input.source !== "slack" || !input.guildId) {
+      throw new Error("slack_workspace_code requires a Slack workspace context.");
+    }
+
+    const payload =
+      args && typeof args === "object"
+        ? (args as { query?: unknown; repoFullName?: unknown; limit?: unknown })
+        : {};
+    return searchSlackWorkspaceCode({
+      workspaceId: input.guildId,
       query: typeof payload.query === "string" ? payload.query : "",
       repoFullName: typeof payload.repoFullName === "string" ? payload.repoFullName : undefined,
       limit: typeof payload.limit === "number" ? payload.limit : undefined,
@@ -439,6 +607,27 @@ function formatDiscordCurrentMessage(input: AgentResponseInput) {
   return `Current Discord message from ${mention} (${displayName}) at ${sentAt}:\n${input.input}`;
 }
 
+function formatSlackHistoryMessage(message: SlackChannelMessage) {
+  const author =
+    message.authorDisplayName && message.authorDisplayName !== message.authorUsername
+      ? `${message.authorMention} (${message.authorDisplayName}, ${message.authorUsername})`
+      : `${message.authorMention} (${message.authorUsername})`;
+
+  return `- ${message.sentAt} | ${message.role} | ${author}: ${message.content}`;
+}
+
+function formatSlackCurrentMessage(input: AgentResponseInput) {
+  const mention = input.authorMention ?? (input.authorId ? `<@${input.authorId}>` : "Unknown user");
+  const username = input.authorUsername ?? input.authorId ?? "unknown";
+  const displayName =
+    input.authorDisplayName && input.authorDisplayName !== username
+      ? `${input.authorDisplayName}, ${username}`
+      : username;
+  const sentAt = input.sentAt ?? new Date().toISOString();
+
+  return `Current Slack message from ${mention} (${displayName}) at ${sentAt}:\n${input.input}`;
+}
+
 function getDiscordInputMessages(input: AgentResponseInput) {
   if (input.source !== "discord" || !input.guildId || !input.channelId) {
     return [{ role: "user", content: input.input } satisfies OpenAiInputMessage];
@@ -473,6 +662,54 @@ function getDiscordInputMessages(input: AgentResponseInput) {
         `${transcript || "No prior channel messages."}\n\n${formatDiscordCurrentMessage(input)}`,
     },
   ] satisfies OpenAiInputMessage[];
+}
+
+function getSlackInputMessages(input: AgentResponseInput) {
+  if (input.source !== "slack" || !input.guildId || !input.channelId) {
+    return [{ role: "user", content: input.input } satisfies OpenAiInputMessage];
+  }
+
+  const history = getSlackChannelHistory({
+    workspaceId: input.guildId,
+    channelId: input.channelId,
+    limit: defaultHistoryLimit,
+  });
+
+  if (history.length === 0) {
+    return [
+      {
+        role: "user",
+        content: formatSlackCurrentMessage(input),
+      },
+    ] satisfies OpenAiInputMessage[];
+  }
+
+  const historyWithoutCurrent = input.messageId
+    ? history.filter((message) => message.messageId !== input.messageId)
+    : history;
+  const transcript = historyWithoutCurrent.map(formatSlackHistoryMessage).join("\n");
+
+  return [
+    {
+      role: "user",
+      content:
+        "Slack channel context for memory only. Do not copy this transcript format in your reply. " +
+        "Use Slack mention tags only when naturally addressing someone.\n" +
+        `${transcript || "No prior channel messages."}\n\n${formatSlackCurrentMessage(input)}`,
+    },
+  ] satisfies OpenAiInputMessage[];
+}
+
+function getInputMessages(input: AgentResponseInput) {
+  if (input.source === "discord") {
+    return getDiscordInputMessages(input);
+  }
+
+  if (input.source === "slack") {
+    return getSlackInputMessages(input);
+  }
+
+  return [{ role: "user", content: input.input } satisfies OpenAiInputMessage];
 }
 
 function totalInputChars(inputMessages: OpenAiInputMessage[], instructions: string) {
@@ -554,7 +791,7 @@ async function generateOpenAiResponse(input: AgentResponseInput): Promise<AgentR
     apiKey,
     model: config.model,
     instructions: config.instructions,
-    inputMessages: getDiscordInputMessages(input),
+    inputMessages: getInputMessages(input),
   });
   const tools = getEnabledOpenAiTools(input);
 
@@ -562,7 +799,7 @@ async function generateOpenAiResponse(input: AgentResponseInput): Promise<AgentR
     model: config.model,
     instructions:
       tools.length > 0
-        ? `${config.instructions}\n\nCurrent time: ${new Date().toISOString()}.\nDo not include channel-history transcript prefixes, timestamps, or speaker labels in your final answer. Reply naturally as Alshival. Use discord_guild_kb when guild-specific knowledge could help answer accurately. Use discord_guild_code when the user needs implementation details, exact code references, or the KB summary is not enough. Use reminder tools when the user asks you to remind them, edit a reminder, or delete a reminder. Reminder times must be absolute ISO-8601 timestamps. During casual Discord conversations, use GIFs often to express personality, reactions, humor, excitement, agreement, or encouragement. When you use a tool, use its result directly. For GIF results, include one selected GIF URL in your final answer when appropriate.`
+        ? `${config.instructions}\n\nCurrent time: ${new Date().toISOString()}.\nDo not include channel-history transcript prefixes, timestamps, or speaker labels in your final answer. Reply naturally as Alshival. Use platform-specific knowledge base tools when workspace or guild knowledge could help answer accurately. Use platform-specific code search tools when the user needs implementation details, exact code references, or the KB summary is not enough. Use reminder tools when the user asks you to remind them, edit a reminder, or delete a reminder. Reminder times must be absolute ISO-8601 timestamps. During casual Discord or Slack conversations, use GIFs often to express personality, reactions, humor, excitement, agreement, or encouragement. When you use a tool, use its result directly. For GIF results, include one selected GIF URL in your final answer when appropriate.`
         : `${config.instructions}\n\nCurrent time: ${new Date().toISOString()}.\nDo not include channel-history transcript prefixes, timestamps, or speaker labels in your final answer. Reply naturally as Alshival.`,
     tools,
   };
@@ -665,7 +902,7 @@ async function generateOpenAiResponse(input: AgentResponseInput): Promise<AgentR
         input: [
           {
             role: "user",
-            content: "Please provide the final Discord reply now, using the available tool results.",
+            content: "Please provide the final platform reply now, using the available tool results.",
           },
         ] satisfies OpenAiInputMessage[],
       }),

@@ -2,13 +2,15 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { generateAgentResponse } from "./agent.js";
 import { DiscordPlatformAdapter } from "./platforms/discord.js";
 import { PlatformManager } from "./platforms/manager.js";
-import type { DiscordGuildSummary } from "./platforms/types.js";
+import { SlackPlatformAdapter } from "./platforms/slack.js";
+import type { DiscordGuildSummary, SlackChannelSummary, SlackWorkspaceSummary } from "./platforms/types.js";
 
 const host = process.env.BACKEND_HOST ?? "127.0.0.1";
 const port = Number(process.env.BACKEND_PORT ?? 4000);
 
 const manager = new PlatformManager();
 manager.register(new DiscordPlatformAdapter());
+manager.register(new SlackPlatformAdapter());
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown) {
   response.writeHead(statusCode, {
@@ -130,6 +132,31 @@ async function handlePlatformRoute(
 
     const guilds = (adapter as DiscordPlatformAdapter).listGuilds();
     sendJson(response, 200, { guilds } satisfies { guilds: DiscordGuildSummary[] });
+    return;
+  }
+
+  if (platform === "slack" && action === "workspaces") {
+    if (request.method !== "GET") {
+      methodNotAllowed(response);
+      return;
+    }
+
+    const workspaces = await (adapter as SlackPlatformAdapter).listWorkspaces();
+    sendJson(response, 200, { workspaces } satisfies { workspaces: SlackWorkspaceSummary[] });
+    return;
+  }
+
+  if (platform === "slack" && action === "channels") {
+    if (request.method !== "GET") {
+      methodNotAllowed(response);
+      return;
+    }
+
+    const url = new URL(request.url ?? "/", `http://${host}:${port}`);
+    const channels = await (adapter as SlackPlatformAdapter).listChannels(
+      url.searchParams.get("workspaceId") ?? undefined,
+    );
+    sendJson(response, 200, { channels } satisfies { channels: SlackChannelSummary[] });
     return;
   }
 

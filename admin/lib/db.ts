@@ -3,6 +3,7 @@ import path from "node:path";
 
 type DiscordRow = {
   bot_token: string | null;
+  app_token: string | null;
   enabled: 0 | 1;
   desired_running: 0 | 1;
   updated_at: string | null;
@@ -10,6 +11,12 @@ type DiscordRow = {
 
 type SaveDiscordSettingsInput = {
   token: string;
+  enabled: boolean;
+};
+
+type SaveSlackSettingsInput = {
+  botToken: string;
+  appToken: string;
   enabled: boolean;
 };
 
@@ -92,6 +99,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS platform_settings (
     platform TEXT PRIMARY KEY,
     bot_token TEXT,
+    app_token TEXT,
     enabled INTEGER NOT NULL DEFAULT 0,
     desired_running INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT
@@ -128,9 +136,34 @@ db.exec(`
   ON discord_channel_messages (guild_id, channel_id, sent_at, id)
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS slack_channel_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    message_id TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL,
+    author_id TEXT NOT NULL,
+    author_username TEXT NOT NULL,
+    author_display_name TEXT NOT NULL,
+    author_mention TEXT NOT NULL,
+    content TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )
+`);
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_slack_channel_messages_channel_sent
+  ON slack_channel_messages (workspace_id, channel_id, sent_at, id)
+`);
+
 const columns = db.prepare("PRAGMA table_info(platform_settings)").all() as Array<{ name: string }>;
 if (!columns.some((column) => column.name === "desired_running")) {
   db.exec("ALTER TABLE platform_settings ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0");
+}
+if (!columns.some((column) => column.name === "app_token")) {
+  db.exec("ALTER TABLE platform_settings ADD COLUMN app_token TEXT");
 }
 
 function toDiscordSettings(row: DiscordRow | undefined) {
@@ -148,7 +181,7 @@ function toDiscordSettings(row: DiscordRow | undefined) {
 export function getDiscordSettings() {
   const row = db
     .prepare(
-      "SELECT bot_token, enabled, desired_running, updated_at FROM platform_settings WHERE platform = ?",
+      "SELECT bot_token, app_token, enabled, desired_running, updated_at FROM platform_settings WHERE platform = ?",
     )
     .get("discord") as DiscordRow | undefined;
 
@@ -158,7 +191,7 @@ export function getDiscordSettings() {
 export function saveDiscordSettings({ token, enabled }: SaveDiscordSettingsInput) {
   const existing = db
     .prepare(
-      "SELECT bot_token, enabled, desired_running, updated_at FROM platform_settings WHERE platform = ?",
+      "SELECT bot_token, app_token, enabled, desired_running, updated_at FROM platform_settings WHERE platform = ?",
     )
     .get("discord") as DiscordRow | undefined;
   const tokenToSave = token.length > 0 ? token : existing?.bot_token ?? null;
@@ -175,6 +208,55 @@ export function saveDiscordSettings({ token, enabled }: SaveDiscordSettingsInput
   ).run("discord", tokenToSave, enabled ? 1 : 0, new Date().toISOString());
 
   return getDiscordSettings();
+}
+
+function toSlackSettings(row: DiscordRow | undefined) {
+  const botToken = row?.bot_token ?? "";
+  const appToken = row?.app_token ?? "";
+
+  return {
+    enabled: Boolean(row?.enabled),
+    desiredRunning: Boolean(row?.desired_running),
+    hasBotToken: botToken.length > 0,
+    botTokenLast4: botToken.length > 0 ? botToken.slice(-4) : null,
+    hasAppToken: appToken.length > 0,
+    appTokenLast4: appToken.length > 0 ? appToken.slice(-4) : null,
+    updatedAt: row?.updated_at ?? null,
+  };
+}
+
+export function getSlackSettings() {
+  const row = db
+    .prepare(
+      "SELECT bot_token, app_token, enabled, desired_running, updated_at FROM platform_settings WHERE platform = ?",
+    )
+    .get("slack") as DiscordRow | undefined;
+
+  return toSlackSettings(row);
+}
+
+export function saveSlackSettings({ botToken, appToken, enabled }: SaveSlackSettingsInput) {
+  const existing = db
+    .prepare(
+      "SELECT bot_token, app_token, enabled, desired_running, updated_at FROM platform_settings WHERE platform = ?",
+    )
+    .get("slack") as DiscordRow | undefined;
+  const botTokenToSave = botToken.length > 0 ? botToken : existing?.bot_token ?? null;
+  const appTokenToSave = appToken.length > 0 ? appToken : existing?.app_token ?? null;
+
+  db.prepare(
+    `
+      INSERT INTO platform_settings (platform, bot_token, app_token, enabled, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(platform) DO UPDATE SET
+        bot_token = excluded.bot_token,
+        app_token = excluded.app_token,
+        enabled = excluded.enabled,
+        updated_at = excluded.updated_at
+    `,
+  ).run("slack", botTokenToSave, appTokenToSave, enabled ? 1 : 0, new Date().toISOString());
+
+  return getSlackSettings();
 }
 
 const githubSshKeySetting = "github_ssh_key";
@@ -423,6 +505,10 @@ function getGuildAgentConfigSetting(guildId: string) {
   return `discord_guild_agent_config:${guildId}`;
 }
 
+function getWorkspaceAgentConfigSetting(workspaceId: string) {
+  return `slack_workspace_agent_config:${workspaceId}`;
+}
+
 export function getGuildAgentConfig(guildId: string): GuildAgentConfig {
   const defaultConfig = getAgentConfig();
   const row = db
@@ -488,10 +574,87 @@ export function deleteGuildAgentConfig(guildId: string) {
   return getGuildAgentConfig(guildId);
 }
 
+export function getWorkspaceAgentConfig(workspaceId: string): GuildAgentConfig {
+  const defaultConfig = getAgentConfig();
+  const row = db
+    .prepare("SELECT value FROM agent_settings WHERE key = ?")
+    .get(getWorkspaceAgentConfigSetting(workspaceId)) as { value: string } | undefined;
+
+  if (!row) {
+    return {
+      ...defaultConfig,
+      inheritsDefault: true,
+    };
+  }
+
+  const parsed = JSON.parse(row.value) as Partial<AgentConfig>;
+
+  return {
+    provider: isLanguageModelProvider(parsed.provider) ? parsed.provider : defaultConfig.provider,
+    model:
+      typeof parsed.model === "string" && parsed.model.trim()
+        ? parsed.model.trim()
+        : defaultConfig.model,
+    instructions:
+      typeof parsed.instructions === "string" && parsed.instructions.trim()
+        ? parsed.instructions.trim()
+        : defaultConfig.instructions,
+    updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : null,
+    inheritsDefault: false,
+  };
+}
+
+export function saveWorkspaceAgentConfig(
+  workspaceId: string,
+  input: {
+    provider: string;
+    model: string;
+    instructions: string;
+  },
+) {
+  const defaultConfig = getAgentConfig();
+  const updatedAt = new Date().toISOString();
+  const settings: AgentConfig = {
+    provider: isLanguageModelProvider(input.provider) ? input.provider : defaultConfig.provider,
+    model: input.model.trim() || defaultConfig.model,
+    instructions: input.instructions.trim() || defaultConfig.instructions,
+    updatedAt,
+  };
+
+  db.prepare(
+    `
+      INSERT INTO agent_settings (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `,
+  ).run(getWorkspaceAgentConfigSetting(workspaceId), JSON.stringify(settings), updatedAt);
+
+  return getWorkspaceAgentConfig(workspaceId);
+}
+
+export function deleteWorkspaceAgentConfig(workspaceId: string) {
+  db.prepare("DELETE FROM agent_settings WHERE key = ?").run(
+    getWorkspaceAgentConfigSetting(workspaceId),
+  );
+  return getWorkspaceAgentConfig(workspaceId);
+}
+
 export function deleteDiscordGuildChatHistory(guildId: string) {
   const result = db
     .prepare("DELETE FROM discord_channel_messages WHERE guild_id = ?")
     .run(guildId) as { changes: number };
+
+  return {
+    deletedMessages: result.changes,
+  };
+}
+
+export function deleteSlackWorkspaceChatHistory(workspaceId: string) {
+  const result = db
+    .prepare("DELETE FROM slack_channel_messages WHERE workspace_id = ?")
+    .run(workspaceId) as { changes: number };
 
   return {
     deletedMessages: result.changes,

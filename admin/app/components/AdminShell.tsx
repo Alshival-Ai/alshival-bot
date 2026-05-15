@@ -12,6 +12,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   const isAgentRoute = pathname.startsWith("/general/agent");
   const isDiscordRoute = pathname.startsWith("/platforms/discord");
   const isGithubRoute = pathname.startsWith("/platforms/github");
+  const isSlackRoute = pathname.startsWith("/platforms/slack");
 
   return (
     <main className="admin-shell">
@@ -93,6 +94,42 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
                   href="/platforms/discord/guilds"
                 >
                   Guilds
+                </Link>
+              </div>
+            ) : null}
+            <Link
+              className={`nav-item nested ${isSlackRoute ? "selected" : ""}`}
+              href="/platforms/slack/global-settings"
+            >
+              <MessageSquare size={17} />
+              <span>Slack</span>
+              <ChevronRight size={15} />
+            </Link>
+            {isSlackRoute ? (
+              <div className="nav-subgroup" aria-label="Slack navigation">
+                <Link
+                  className={`nav-subitem ${
+                    pathname === "/platforms/slack/global-settings" ? "active" : ""
+                  }`}
+                  href="/platforms/slack/global-settings"
+                >
+                  Global Settings
+                </Link>
+                <Link
+                  className={`nav-subitem ${
+                    pathname === "/platforms/slack/workspaces" ? "active" : ""
+                  }`}
+                  href="/platforms/slack/workspaces"
+                >
+                  Workspaces
+                </Link>
+                <Link
+                  className={`nav-subitem ${
+                    pathname === "/platforms/slack/channels" ? "active" : ""
+                  }`}
+                  href="/platforms/slack/channels"
+                >
+                  Channels
                 </Link>
               </div>
             ) : null}

@@ -23,8 +23,12 @@ const chromaPort = Number(process.env.CHROMA_PORT ?? 8000);
 const embeddingModel = "nomic-ai/nomic-embed-text-v1.5";
 const embeddingQuantized = process.env.EMBEDDING_QUANTIZED !== "false";
 
-function getGuildCollectionName(guildId: string) {
+function getDiscordGuildCollectionName(guildId: string) {
   return `discord_guild_${guildId}`;
+}
+
+function getSlackWorkspaceCollectionName(workspaceId: string) {
+  return `slack_workspace_${workspaceId}`;
 }
 
 async function getPipeline() {
@@ -75,15 +79,16 @@ function metadataNumber(value: unknown) {
   return typeof value === "number" ? value : null;
 }
 
-export async function searchDiscordGuildKb(input: {
-  guildId: string;
+async function searchCollection(input: {
+  collectionName: string;
+  contextId: string;
   query: string;
   limit?: number;
 }): Promise<DiscordGuildKbResult> {
   const query = input.query.trim();
 
-  if (!input.guildId.trim()) {
-    throw new Error("guildId is required.");
+  if (!input.contextId.trim()) {
+    throw new Error("context ID is required.");
   }
 
   if (!query) {
@@ -91,10 +96,9 @@ export async function searchDiscordGuildKb(input: {
   }
 
   const limit = Math.max(1, Math.min(Math.trunc(input.limit ?? 5), 10));
-  const collectionName = getGuildCollectionName(input.guildId);
   const client = new ChromaClient({ host: chromaHost, port: chromaPort });
   const collection = await client.getCollection({
-    name: collectionName,
+    name: input.collectionName,
   });
   const result = await collection.query({
     queryEmbeddings: [await embedQuery(query)],
@@ -105,7 +109,7 @@ export async function searchDiscordGuildKb(input: {
   const distances = result.distances?.[0] ?? [];
 
   return {
-    collection: collectionName,
+    collection: input.collectionName,
     query,
     count: documents.length,
     results: documents.map((document, index) => {
@@ -121,4 +125,30 @@ export async function searchDiscordGuildKb(input: {
       };
     }),
   };
+}
+
+export async function searchDiscordGuildKb(input: {
+  guildId: string;
+  query: string;
+  limit?: number;
+}): Promise<DiscordGuildKbResult> {
+  return searchCollection({
+    collectionName: getDiscordGuildCollectionName(input.guildId),
+    contextId: input.guildId,
+    query: input.query,
+    limit: input.limit,
+  });
+}
+
+export async function searchSlackWorkspaceKb(input: {
+  workspaceId: string;
+  query: string;
+  limit?: number;
+}): Promise<DiscordGuildKbResult> {
+  return searchCollection({
+    collectionName: getSlackWorkspaceCollectionName(input.workspaceId),
+    contextId: input.workspaceId,
+    query: input.query,
+    limit: input.limit,
+  });
 }

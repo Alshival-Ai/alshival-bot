@@ -6,7 +6,8 @@ import { getGuildKnowledgeSources } from "./db.js";
 const execFileAsync = promisify(execFile);
 
 const agentHome = process.env.AGENT_HOME ?? path.dirname(process.env.BOT_DB_PATH ?? path.join(process.cwd(), "..", "bot.db"));
-const guildRoot = path.resolve(agentHome, "platform", "Discord", "Guilds");
+const discordGuildRoot = path.resolve(agentHome, "platform", "Discord", "Guilds");
+const slackWorkspaceRoot = path.resolve(agentHome, "platform", "Slack", "Workspaces");
 const defaultContextLines = 2;
 
 export type DiscordGuildCodeSearchResult = {
@@ -21,11 +22,11 @@ export type DiscordGuildCodeSearchResult = {
   }>;
 };
 
-function assertSafeClonePath(clonePath: string) {
+function assertSafeClonePath(clonePath: string, rootPath: string) {
   const resolvedClonePath = path.resolve(clonePath);
 
-  if (!resolvedClonePath.startsWith(`${guildRoot}${path.sep}`)) {
-    throw new Error("Refusing to search a path outside the Discord guild knowledge directory.");
+  if (!resolvedClonePath.startsWith(`${rootPath}${path.sep}`)) {
+    throw new Error("Refusing to search a path outside the platform knowledge directory.");
   }
 
   return resolvedClonePath;
@@ -54,16 +55,17 @@ function parseRipgrepLine(repoFullName: string, clonePath: string, line: string)
   };
 }
 
-export async function searchDiscordGuildCode(input: {
-  guildId: string;
+async function searchKnowledgeCode(input: {
+  contextId: string;
+  rootPath: string;
   query: string;
   repoFullName?: string;
   limit?: number;
 }): Promise<DiscordGuildCodeSearchResult> {
   const query = input.query.trim();
 
-  if (!input.guildId.trim()) {
-    throw new Error("guildId is required.");
+  if (!input.contextId.trim()) {
+    throw new Error("context ID is required.");
   }
 
   if (!query) {
@@ -71,7 +73,7 @@ export async function searchDiscordGuildCode(input: {
   }
 
   const limit = Math.max(1, Math.min(Math.trunc(input.limit ?? 20), 50));
-  const sources = getGuildKnowledgeSources(input.guildId).filter(
+  const sources = getGuildKnowledgeSources(input.contextId).filter(
     (source) => !input.repoFullName || source.repoFullName === input.repoFullName,
   );
   const results: DiscordGuildCodeSearchResult["results"] = [];
@@ -81,7 +83,7 @@ export async function searchDiscordGuildCode(input: {
       break;
     }
 
-    const clonePath = assertSafeClonePath(source.clonePath);
+    const clonePath = assertSafeClonePath(source.clonePath, input.rootPath);
     const remaining = limit - results.length;
 
     try {
@@ -145,4 +147,34 @@ export async function searchDiscordGuildCode(input: {
     count: results.length,
     results,
   };
+}
+
+export async function searchDiscordGuildCode(input: {
+  guildId: string;
+  query: string;
+  repoFullName?: string;
+  limit?: number;
+}): Promise<DiscordGuildCodeSearchResult> {
+  return searchKnowledgeCode({
+    contextId: input.guildId,
+    rootPath: discordGuildRoot,
+    query: input.query,
+    repoFullName: input.repoFullName,
+    limit: input.limit,
+  });
+}
+
+export async function searchSlackWorkspaceCode(input: {
+  workspaceId: string;
+  query: string;
+  repoFullName?: string;
+  limit?: number;
+}): Promise<DiscordGuildCodeSearchResult> {
+  return searchKnowledgeCode({
+    contextId: input.workspaceId,
+    rootPath: slackWorkspaceRoot,
+    query: input.query,
+    repoFullName: input.repoFullName,
+    limit: input.limit,
+  });
 }
