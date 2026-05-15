@@ -1,0 +1,31 @@
+github/
+
+# Local environment
+.env
+.env.*
+!.env.example
+bot.db
+bot.db-*
+.ssh/
+platform/
+chroma/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# Python / MCP
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

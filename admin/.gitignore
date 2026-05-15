@@ -1,0 +1,7 @@
+.next/
+node_modules/
+out/
+*.tsbuildinfo
+.env*
+bot.db
+bot.db-*
