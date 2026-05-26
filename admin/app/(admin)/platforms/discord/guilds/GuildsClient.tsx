@@ -327,7 +327,7 @@ export default function GuildsClient() {
       setKnowledgeSources(data.sources ?? []);
       setSelectedRepoFullName("");
       setRemoteOrigin("");
-      setKnowledgeStatus("Knowledge source added.");
+      setKnowledgeStatus("Knowledge source added. Indexing is running in the background.");
     } catch (error) {
       setKnowledgeStatus(error instanceof Error ? error.message : "Could not add knowledge source.");
     } finally {
@@ -361,6 +361,45 @@ export default function GuildsClient() {
       setKnowledgeStatus("Knowledge source removed.");
     } catch (error) {
       setKnowledgeStatus(error instanceof Error ? error.message : "Could not remove knowledge source.");
+    } finally {
+      setIsKnowledgeLoading(false);
+    }
+  }
+
+  async function pullKnowledgeSource(sourceId: number) {
+    if (!selectedGuild) {
+      return;
+    }
+
+    setIsKnowledgeLoading(true);
+    setKnowledgeStatus("Pulling knowledge source changes...");
+
+    try {
+      const response = await fetch(
+        `/api/platforms/discord/guilds/${selectedGuild.id}/knowledge?sourceId=${sourceId}`,
+        { method: "PATCH" },
+      );
+      const data = (await response.json()) as {
+        sources?: GuildKnowledgeSource[];
+        index?: { markdownFiles: number; chunks: number };
+        sync?: { queued: boolean };
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not pull knowledge source changes.");
+      }
+
+      setKnowledgeSources(data.sources ?? []);
+      setKnowledgeStatus(
+        data.index
+          ? `Pulled changes and indexed ${data.index.markdownFiles} Markdown file${data.index.markdownFiles === 1 ? "" : "s"}.`
+          : data.sync?.queued
+            ? "Knowledge source changes pulled. Indexing is running in the background."
+            : "Knowledge source changes pulled.",
+      );
+    } catch (error) {
+      setKnowledgeStatus(error instanceof Error ? error.message : "Could not pull knowledge source changes.");
     } finally {
       setIsKnowledgeLoading(false);
     }
@@ -631,15 +670,26 @@ export default function GuildsClient() {
                             : "Not indexed yet"}
                         </small>
                       </span>
-                      <button
-                        className="secondary-action fit-content"
-                        disabled={isKnowledgeLoading}
-                        onClick={() => void removeKnowledgeSource(source.id)}
-                        type="button"
-                      >
-                        <Trash2 size={16} />
-                        Remove
-                      </button>
+                      <div className="button-row">
+                        <button
+                          className="secondary-action fit-content"
+                          disabled={isKnowledgeLoading}
+                          onClick={() => void pullKnowledgeSource(source.id)}
+                          type="button"
+                        >
+                          <RefreshCw size={16} />
+                          Pull Changes
+                        </button>
+                        <button
+                          className="secondary-action fit-content"
+                          disabled={isKnowledgeLoading}
+                          onClick={() => void removeKnowledgeSource(source.id)}
+                          type="button"
+                        >
+                          <Trash2 size={16} />
+                          Remove
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>

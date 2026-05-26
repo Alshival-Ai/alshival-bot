@@ -214,10 +214,11 @@ export async function deleteRepositoryVectors(input: {
   guildId: string;
   sourceId: number;
   platform?: "discord" | "slack";
+  collectionName?: string | null;
 }) {
   const client = new ChromaClient({ host: chromaHost, port: chromaPort });
   const collection = await client.getOrCreateCollection({
-    name: getGuildCollectionName(input.guildId, input.platform ?? "discord"),
+    name: input.collectionName ?? getGuildCollectionName(input.guildId, input.platform ?? "discord"),
     embeddingFunction: null,
   });
 

@@ -1,10 +1,11 @@
 import { App } from "@slack/bolt";
 import { generateAgentResponse } from "../agent.js";
 import {
-  getDueSlackReminders,
+  claimDueSlackReminders,
   getPlatformSettings,
   getSlackWorkspaceSettings,
   markReminderSent,
+  releaseReminderClaim,
   saveSlackChannelMessage,
   saveSlackWorkspaceSetting,
   setDesiredRunning,
@@ -41,6 +42,12 @@ type SlackWorkspaceRuntime = {
   displayName?: string;
   ready: boolean;
   error?: string;
+};
+
+type SlackMessageDelivery = {
+  runtime: SlackWorkspaceRuntime;
+  messageId?: string;
+  sentAt: string;
 };
 
 type SlackWorkspaceStartInput = {
@@ -334,16 +341,53 @@ export class SlackPlatformAdapter implements PlatformAdapter {
     return lines.join("\n");
   }
 
-  private async sendChannelMessage(workspaceId: string, channelId: string, content: string) {
+  private slackTsToIso(ts: string | undefined) {
+    const seconds = ts ? Number(ts.split(".")[0]) : NaN;
+    return Number.isFinite(seconds) ? new Date(seconds * 1000).toISOString() : new Date().toISOString();
+  }
+
+  private async sendChannelMessage(workspaceId: string, channelId: string, content: string): Promise<SlackMessageDelivery> {
     const runtime = this.getRuntime(workspaceId);
+    let firstMessageTs: string | undefined;
 
     for (const chunk of this.splitSlackText(content)) {
-      await runtime.app.client.chat.postMessage({
+      const result = await runtime.app.client.chat.postMessage({
         channel: channelId,
         text: chunk,
         unfurl_links: true,
         unfurl_media: true,
       });
+      firstMessageTs ??= result.ts;
+    }
+
+    return {
+      runtime,
+      messageId: firstMessageTs,
+      sentAt: this.slackTsToIso(firstMessageTs),
+    };
+  }
+
+  private saveReminderDelivery(reminder: Reminder, content: string, delivery: SlackMessageDelivery) {
+    if (!reminder.guildId || !reminder.channelId || !delivery.messageId) {
+      return;
+    }
+
+    try {
+      saveSlackChannelMessage({
+        workspaceId: reminder.guildId,
+        channelId: reminder.channelId,
+        messageId: delivery.messageId,
+        role: "assistant",
+        authorId: delivery.runtime.botUserId ?? "slack-bot",
+        authorUsername: delivery.runtime.displayName ?? "Alshival",
+        authorDisplayName: delivery.runtime.displayName ?? "Alshival",
+        authorMention: delivery.runtime.botUserId ? `<@${delivery.runtime.botUserId}>` : "@Alshival",
+        content,
+        sentAt: delivery.sentAt,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown Slack reminder history error.";
+      console.error(`Slack reminder ${reminder.id} history save error: ${message}`);
     }
   }
 
@@ -366,16 +410,25 @@ export class SlackPlatformAdapter implements PlatformAdapter {
     this.processingReminders = true;
 
     try {
-      const reminders = getDueSlackReminders(new Date().toISOString());
+      const reminders = claimDueSlackReminders(new Date().toISOString());
 
       for (const reminder of reminders) {
-        if (!reminder.channelId || !reminder.guildId) {
-          console.error(`Reminder ${reminder.id} is missing a Slack workspace or channel ID.`);
-          continue;
-        }
+        try {
+          if (!reminder.channelId || !reminder.guildId) {
+            console.error(`Reminder ${reminder.id} is missing a Slack workspace or channel ID.`);
+            releaseReminderClaim(reminder.id);
+            continue;
+          }
 
-        await this.sendChannelMessage(reminder.guildId, reminder.channelId, this.formatReminder(reminder));
-        markReminderSent(reminder.id);
+          const content = this.formatReminder(reminder);
+          const delivery = await this.sendChannelMessage(reminder.guildId, reminder.channelId, content);
+          this.saveReminderDelivery(reminder, content, delivery);
+          markReminderSent(reminder.id);
+        } catch (error) {
+          releaseReminderClaim(reminder.id);
+          const message = error instanceof Error ? error.message : "Unknown Slack reminder delivery error.";
+          console.error(`Slack reminder ${reminder.id} delivery error: ${message}`);
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown Slack reminder job error.";

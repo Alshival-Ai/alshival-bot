@@ -1,9 +1,10 @@
 import { Client, Events, GatewayIntentBits } from "discord.js";
 import { generateAgentResponse } from "../agent.js";
 import {
-  getDueDiscordReminders,
+  claimDueDiscordReminders,
   getPlatformSettings,
   markReminderSent,
+  releaseReminderClaim,
   saveDiscordChannelMessage,
   setDesiredRunning,
   type Reminder,
@@ -12,6 +13,14 @@ import type { DiscordGuildSummary, PlatformAdapter, PlatformStatus } from "./typ
 
 const discordMessageLimit = 2000;
 const discordMessageTarget = 1900;
+
+type DiscordMessageDelivery = {
+  messageId: string;
+  authorId: string;
+  authorUsername: string;
+  authorDisplayName: string;
+  sentAt: string;
+};
 
 export class DiscordPlatformAdapter implements PlatformAdapter {
   readonly platform = "discord";
@@ -177,7 +186,7 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
     return lines.join("\n");
   }
 
-  private async sendChannelMessage(channelId: string, content: string) {
+  private async sendChannelMessage(channelId: string, content: string): Promise<DiscordMessageDelivery> {
     if (!this.client) {
       throw new Error("Discord client is not running.");
     }
@@ -188,8 +197,47 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
       throw new Error(`Discord channel ${channelId} cannot receive messages.`);
     }
 
+    let firstMessage: Awaited<ReturnType<typeof channel.send>> | undefined;
+
     for (const chunk of this.splitDiscordText(content)) {
-      await channel.send(chunk);
+      const sent = await channel.send(chunk);
+      firstMessage ??= sent;
+    }
+
+    if (!firstMessage) {
+      throw new Error(`Discord reminder delivery to channel ${channelId} did not return a message.`);
+    }
+
+    return {
+      messageId: firstMessage.id,
+      authorId: firstMessage.author.id,
+      authorUsername: firstMessage.author.username,
+      authorDisplayName: firstMessage.author.displayName ?? firstMessage.author.username,
+      sentAt: firstMessage.createdAt.toISOString(),
+    };
+  }
+
+  private saveReminderDelivery(reminder: Reminder, content: string, delivery: DiscordMessageDelivery) {
+    if (!reminder.guildId || !reminder.channelId) {
+      return;
+    }
+
+    try {
+      saveDiscordChannelMessage({
+        guildId: reminder.guildId,
+        channelId: reminder.channelId,
+        messageId: delivery.messageId,
+        role: "assistant",
+        authorId: delivery.authorId,
+        authorUsername: delivery.authorUsername,
+        authorDisplayName: delivery.authorDisplayName,
+        authorMention: `<@${delivery.authorId}>`,
+        content,
+        sentAt: delivery.sentAt,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown reminder history error.";
+      console.error(`Discord reminder ${reminder.id} history save error: ${message}`);
     }
   }
 
@@ -212,16 +260,25 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
     this.processingReminders = true;
 
     try {
-      const reminders = getDueDiscordReminders(new Date().toISOString());
+      const reminders = claimDueDiscordReminders(new Date().toISOString());
 
       for (const reminder of reminders) {
-        if (!reminder.channelId) {
-          console.error(`Reminder ${reminder.id} is missing a Discord channel ID.`);
-          continue;
-        }
+        try {
+          if (!reminder.channelId) {
+            console.error(`Reminder ${reminder.id} is missing a Discord channel ID.`);
+            releaseReminderClaim(reminder.id);
+            continue;
+          }
 
-        await this.sendChannelMessage(reminder.channelId, this.formatReminder(reminder));
-        markReminderSent(reminder.id);
+          const content = this.formatReminder(reminder);
+          const delivery = await this.sendChannelMessage(reminder.channelId, content);
+          this.saveReminderDelivery(reminder, content, delivery);
+          markReminderSent(reminder.id);
+        } catch (error) {
+          releaseReminderClaim(reminder.id);
+          const message = error instanceof Error ? error.message : "Unknown reminder delivery error.";
+          console.error(`Discord reminder ${reminder.id} delivery error: ${message}`);
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown reminder job error.";
@@ -273,7 +330,7 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
       this.displayName = client.user?.tag;
       this.error = undefined;
       console.log(`Discord bot is online as ${this.displayName ?? "unknown user"}`);
-      console.log("Discord message trigger is listening for messages containing: alshival");
+      console.log("Discord message trigger is listening for bot user/role mentions or messages containing: alshival");
       this.startReminderJob();
     });
 
@@ -305,7 +362,13 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
           sentAt,
         });
 
-        if (!message.content.toLowerCase().includes("alshival")) {
+        const botUserId = this.client?.user?.id;
+        const mentionsBotUser = botUserId ? message.mentions.users.has(botUserId) : false;
+        const mentionsBotRole =
+          message.guild?.members.me?.roles.cache.some((role) => message.mentions.roles.has(role.id)) ?? false;
+        const namesBot = message.content.toLowerCase().includes("alshival");
+
+        if (!mentionsBotUser && !mentionsBotRole && !namesBot) {
           return;
         }
 
@@ -326,16 +389,25 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
         const replyParts = this.splitDiscordReply(response.text);
         const textChunks = this.splitDiscordText(replyParts.text);
         const outboundMessages = textChunks.length > 0 ? textChunks : replyParts.gifUrls.slice(0, 1);
-        const reply = await message.reply(outboundMessages[0] || "Done.");
+        const reply = await message.reply({
+          content: outboundMessages[0] || "Done.",
+          allowedMentions: { parse: [], repliedUser: false },
+        });
         const botUser = reply.author;
 
         for (const chunk of outboundMessages.slice(1)) {
-          await message.channel.send(chunk);
+          await message.channel.send({
+            content: chunk,
+            allowedMentions: { parse: [] },
+          });
         }
 
         const gifUrlsToSend = textChunks.length > 0 ? replyParts.gifUrls : replyParts.gifUrls.slice(1);
         for (const gifUrl of gifUrlsToSend) {
-          await message.channel.send(gifUrl);
+          await message.channel.send({
+            content: gifUrl,
+            allowedMentions: { parse: [] },
+          });
         }
 
         saveDiscordChannelMessage({

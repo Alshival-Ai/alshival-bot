@@ -1,6 +1,5 @@
-import { ChromaClient } from "chromadb";
-
-type Pipeline = (input: string | string[], options?: Record<string, unknown>) => Promise<unknown>;
+import { ChromaClient, type Where } from "chromadb";
+import { embedQuery, getKnowledgeCollectionName } from "./embeddings.js";
 
 export type KnowledgeKbResult = {
   collection: string;
@@ -16,59 +15,18 @@ export type KnowledgeKbResult = {
   }>;
 };
 
-let embeddingPipeline: Promise<Pipeline> | null = null;
+type KnowledgeKbSearchResult = KnowledgeKbResult["results"][number];
 
 const chromaHost = process.env.CHROMA_HOST ?? "127.0.0.1";
 const chromaPort = Number(process.env.CHROMA_PORT ?? 8000);
-const embeddingModel = "nomic-ai/nomic-embed-text-v1.5";
-const embeddingQuantized = process.env.EMBEDDING_QUANTIZED !== "false";
+const broadSearchOverfetchLimit = 50;
 
 function getDiscordGuildCollectionName(guildId: string) {
-  return `discord_guild_${guildId}`;
+  return getKnowledgeCollectionName(guildId, "discord");
 }
 
 function getSlackWorkspaceCollectionName(workspaceId: string) {
-  return `slack_workspace_${workspaceId}`;
-}
-
-async function getPipeline() {
-  if (!embeddingPipeline) {
-    embeddingPipeline = import("@xenova/transformers").then(async ({ env, pipeline }) => {
-      env.allowLocalModels = true;
-      return pipeline("feature-extraction", embeddingModel, {
-        quantized: embeddingQuantized,
-      }) as Promise<Pipeline>;
-    });
-  }
-
-  return embeddingPipeline;
-}
-
-function flattenEmbedding(output: unknown) {
-  if (
-    typeof output === "object" &&
-    output !== null &&
-    "tolist" in output &&
-    typeof (output as { tolist: unknown }).tolist === "function"
-  ) {
-    const value = (output as { tolist: () => unknown }).tolist();
-    if (Array.isArray(value) && Array.isArray(value[0])) {
-      return value[0] as number[];
-    }
-    return value as number[];
-  }
-
-  throw new Error("Embedding model returned an unsupported output shape.");
-}
-
-async function embedQuery(query: string) {
-  const extractor = await getPipeline();
-  const output = await extractor(`search_query: ${query}`, {
-    pooling: "mean",
-    normalize: true,
-  });
-
-  return flattenEmbedding(output);
+  return getKnowledgeCollectionName(workspaceId, "slack");
 }
 
 function metadataString(value: unknown) {
@@ -79,13 +37,80 @@ function metadataNumber(value: unknown) {
   return typeof value === "number" ? value : null;
 }
 
+function getBroadSearchResultLimit(limit: number) {
+  return Math.min(broadSearchOverfetchLimit, Math.max(limit * 4, 20));
+}
+
+function sourceKey(result: KnowledgeKbSearchResult) {
+  return result.repoFullName ?? `source:${result.sourceId ?? "unknown"}`;
+}
+
+function fileKey(result: KnowledgeKbSearchResult) {
+  return `${sourceKey(result)}:${result.relativePath ?? "unknown"}`;
+}
+
+export function buildKnowledgeQueryOptions(input: {
+  queryEmbedding: number[];
+  limit: number;
+  repoFullName?: string;
+}) {
+  const repoFullName = input.repoFullName?.trim();
+  const where: Where | undefined = repoFullName ? { repoFullName } : undefined;
+
+  return {
+    queryEmbeddings: [input.queryEmbedding],
+    nResults: where ? input.limit : getBroadSearchResultLimit(input.limit),
+    ...(where ? { where } : {}),
+  };
+}
+
+export function diversifyBroadResults(results: KnowledgeKbSearchResult[], limit: number) {
+  if (results.length <= limit) {
+    return results;
+  }
+
+  const repoCap = Math.max(2, Math.ceil(limit / 2));
+  const fileCap = Math.max(1, Math.floor(limit / 3));
+  const selected: KnowledgeKbSearchResult[] = [];
+  const deferred: KnowledgeKbSearchResult[] = [];
+  const repoCounts = new Map<string, number>();
+  const fileCounts = new Map<string, number>();
+
+  for (const result of results) {
+    const repo = sourceKey(result);
+    const file = fileKey(result);
+    const repoCount = repoCounts.get(repo) ?? 0;
+    const fileCount = fileCounts.get(file) ?? 0;
+
+    if (selected.length < limit && repoCount < repoCap && fileCount < fileCap) {
+      selected.push(result);
+      repoCounts.set(repo, repoCount + 1);
+      fileCounts.set(file, fileCount + 1);
+    } else {
+      deferred.push(result);
+    }
+  }
+
+  for (const result of deferred) {
+    if (selected.length >= limit) {
+      break;
+    }
+
+    selected.push(result);
+  }
+
+  return selected;
+}
+
 async function searchCollection(input: {
   collectionName: string;
   contextId: string;
   query: string;
   limit?: number;
+  repoFullName?: string;
 }): Promise<KnowledgeKbResult> {
   const query = input.query.trim();
+  const repoFullName = input.repoFullName?.trim();
 
   if (!input.contextId.trim()) {
     throw new Error("context ID is required.");
@@ -100,30 +125,35 @@ async function searchCollection(input: {
   const collection = await client.getCollection({
     name: input.collectionName,
   });
-  const result = await collection.query({
-    queryEmbeddings: [await embedQuery(query)],
-    nResults: limit,
-  });
+  const result = await collection.query(
+    buildKnowledgeQueryOptions({
+      queryEmbedding: await embedQuery(query),
+      limit,
+      repoFullName,
+    }),
+  );
   const documents = result.documents?.[0] ?? [];
   const metadatas = result.metadatas?.[0] ?? [];
   const distances = result.distances?.[0] ?? [];
+  const results = documents.map((document, index) => {
+    const metadata = metadatas[index] ?? {};
+
+    return {
+      text: document ?? "",
+      distance: distances[index] ?? null,
+      repoFullName: metadataString(metadata.repoFullName),
+      relativePath: metadataString(metadata.relativePath),
+      sourceId: metadataNumber(metadata.sourceId),
+      chunkIndex: metadataNumber(metadata.chunkIndex),
+    };
+  });
+  const selectedResults = repoFullName ? results : diversifyBroadResults(results, limit);
 
   return {
     collection: input.collectionName,
     query,
-    count: documents.length,
-    results: documents.map((document, index) => {
-      const metadata = metadatas[index] ?? {};
-
-      return {
-        text: document ?? "",
-        distance: distances[index] ?? null,
-        repoFullName: metadataString(metadata.repoFullName),
-        relativePath: metadataString(metadata.relativePath),
-        sourceId: metadataNumber(metadata.sourceId),
-        chunkIndex: metadataNumber(metadata.chunkIndex),
-      };
-    }),
+    count: selectedResults.length,
+    results: selectedResults,
   };
 }
 
@@ -131,12 +161,14 @@ export async function searchDiscordGuildKb(input: {
   guildId: string;
   query: string;
   limit?: number;
+  repoFullName?: string;
 }): Promise<KnowledgeKbResult> {
   return searchCollection({
     collectionName: getDiscordGuildCollectionName(input.guildId),
     contextId: input.guildId,
     query: input.query,
     limit: input.limit,
+    repoFullName: input.repoFullName,
   });
 }
 
@@ -144,11 +176,13 @@ export async function searchSlackWorkspaceKb(input: {
   workspaceId: string;
   query: string;
   limit?: number;
+  repoFullName?: string;
 }): Promise<KnowledgeKbResult> {
   return searchCollection({
     collectionName: getSlackWorkspaceCollectionName(input.workspaceId),
     contextId: input.workspaceId,
     query: input.query,
     limit: input.limit,
+    repoFullName: input.repoFullName,
   });
 }

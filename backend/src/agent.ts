@@ -1,18 +1,15 @@
 import {
-  cancelReminder,
-  createReminder,
   getDiscordChannelHistory,
   getSlackChannelHistory,
   getGuildKnowledgeSources,
   getLanguageModelSettingsUnsafe,
   getMcpToolSettings,
   resolveAgentConfig,
-  updateReminder,
   type DiscordChannelMessage,
   type SlackChannelMessage,
 } from "./db.js";
 import { searchDiscordGuildCode, searchSlackWorkspaceCode } from "./codeSearch.js";
-import { searchGif } from "./mcp.js";
+import { deleteReminder, editReminder, searchGif, setReminder } from "./mcp.js";
 import { searchDiscordGuildKb, searchSlackWorkspaceKb } from "./vectorSearch.js";
 
 export type AgentResponseInput = {
@@ -133,13 +130,17 @@ function getEnabledOpenAiTools(input: AgentResponseInput) {
       type: "function",
       name: "discord_guild_kb",
       description:
-        "Search this Discord guild's indexed knowledge base. Use this for questions about guild-specific docs, repositories, policies, project context, or saved knowledge sources.",
+        "Search this Discord guild's indexed knowledge base. Use this for questions about guild-specific docs, repositories, policies, project context, or saved knowledge sources. When the user names or clearly implies a specific GitHub repo, pass repoFullName to limit semantic retrieval to that repo.",
       parameters: {
         type: "object",
         properties: {
           query: {
             type: "string",
             description: "Focused semantic search query for this guild's knowledge base.",
+          },
+          repoFullName: {
+            type: "string",
+            description: "Optional GitHub repo full name to limit semantic search, like owner/repo.",
           },
           limit: {
             type: "integer",
@@ -269,13 +270,17 @@ function getEnabledOpenAiTools(input: AgentResponseInput) {
       type: "function",
       name: "slack_workspace_kb",
       description:
-        "Search this Slack workspace's indexed knowledge base. Use this for workspace-specific docs, repositories, policies, project context, or saved knowledge sources.",
+        "Search this Slack workspace's indexed knowledge base. Use this for workspace-specific docs, repositories, policies, project context, or saved knowledge sources. When the user names or clearly implies a specific GitHub repo, pass repoFullName to limit semantic retrieval to that repo.",
       parameters: {
         type: "object",
         properties: {
           query: {
             type: "string",
             description: "Focused semantic search query for this Slack workspace's knowledge base.",
+          },
+          repoFullName: {
+            type: "string",
+            description: "Optional GitHub repo full name to limit semantic search, like owner/repo.",
           },
           limit: {
             type: "integer",
@@ -462,10 +467,14 @@ async function callTool(name: string, rawArguments: string, input: AgentResponse
       throw new Error("discord_guild_kb requires a Discord guild context.");
     }
 
-    const payload = args && typeof args === "object" ? (args as { query?: unknown; limit?: unknown }) : {};
+    const payload =
+      args && typeof args === "object"
+        ? (args as { query?: unknown; repoFullName?: unknown; limit?: unknown })
+        : {};
     return searchDiscordGuildKb({
       guildId: input.guildId,
       query: typeof payload.query === "string" ? payload.query : "",
+      repoFullName: typeof payload.repoFullName === "string" ? payload.repoFullName : undefined,
       limit: typeof payload.limit === "number" ? payload.limit : undefined,
     });
   }
@@ -492,10 +501,14 @@ async function callTool(name: string, rawArguments: string, input: AgentResponse
       throw new Error("slack_workspace_kb requires a Slack workspace context.");
     }
 
-    const payload = args && typeof args === "object" ? (args as { query?: unknown; limit?: unknown }) : {};
+    const payload =
+      args && typeof args === "object"
+        ? (args as { query?: unknown; repoFullName?: unknown; limit?: unknown })
+        : {};
     return searchSlackWorkspaceKb({
       workspaceId: input.guildId,
       query: typeof payload.query === "string" ? payload.query : "",
+      repoFullName: typeof payload.repoFullName === "string" ? payload.repoFullName : undefined,
       limit: typeof payload.limit === "number" ? payload.limit : undefined,
     });
   }
@@ -528,16 +541,18 @@ async function callTool(name: string, rawArguments: string, input: AgentResponse
         : {};
     const remindAt = parseReminderTime(typeof payload.remindAt === "string" ? payload.remindAt : "");
 
-    return createReminder({
-      platform: input.source,
-      guildId: input.guildId,
-      channelId: input.channelId,
-      authorId: input.authorId,
-      authorMention: input.authorMention,
-      title: typeof payload.title === "string" ? payload.title.trim() : "",
-      message: typeof payload.message === "string" ? payload.message.trim() : undefined,
-      remindAt,
-    });
+    return (
+      await setReminder({
+        platform: input.source,
+        guildId: input.guildId,
+        channelId: input.channelId,
+        authorId: input.authorId,
+        authorMention: input.authorMention,
+        title: typeof payload.title === "string" ? payload.title.trim() : "",
+        message: typeof payload.message === "string" ? payload.message.trim() : undefined,
+        remindAt,
+      })
+    ).reminder;
   }
 
   if (name === "edit_reminder") {
@@ -551,15 +566,17 @@ async function callTool(name: string, rawArguments: string, input: AgentResponse
       throw new Error("reminderId must be a positive integer.");
     }
 
-    return updateReminder({
-      id: reminderId,
-      title: typeof payload.title === "string" ? payload.title : undefined,
-      message: typeof payload.message === "string" ? payload.message : undefined,
-      remindAt:
-        typeof payload.remindAt === "string" && payload.remindAt.trim()
-          ? parseReminderTime(payload.remindAt)
-          : undefined,
-    });
+    return (
+      await editReminder({
+        id: reminderId,
+        title: typeof payload.title === "string" ? payload.title : undefined,
+        message: typeof payload.message === "string" ? payload.message : undefined,
+        remindAt:
+          typeof payload.remindAt === "string" && payload.remindAt.trim()
+            ? parseReminderTime(payload.remindAt)
+            : undefined,
+      })
+    ).reminder;
   }
 
   if (name === "delete_reminder") {
@@ -570,7 +587,7 @@ async function callTool(name: string, rawArguments: string, input: AgentResponse
       throw new Error("reminderId must be a positive integer.");
     }
 
-    return cancelReminder(reminderId);
+    return (await deleteReminder({ id: reminderId })).reminder;
   }
 
   throw new Error(`Unsupported tool: ${name}`);

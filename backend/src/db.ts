@@ -105,7 +105,7 @@ export type GithubSshKeyMetadata = {
   updatedAt: string;
 };
 
-export type ReminderStatus = "pending" | "sent" | "cancelled";
+export type ReminderStatus = "pending" | "sending" | "sent" | "cancelled";
 
 export type Reminder = {
   id: number;
@@ -285,7 +285,7 @@ function isLanguageModelProvider(value: unknown): value is LanguageModelProvider
   return value === "openai" || value === "anthropic";
 }
 
-function toReminder(row: {
+type ReminderRow = {
   id: number;
   platform: string;
   guild_id: string | null;
@@ -299,7 +299,9 @@ function toReminder(row: {
   created_at: string;
   updated_at: string;
   sent_at: string | null;
-}): Reminder {
+};
+
+function toReminder(row: ReminderRow): Reminder {
   return {
     id: row.id,
     platform: row.platform,
@@ -311,7 +313,7 @@ function toReminder(row: {
     message: row.message,
     remindAt: row.remind_at,
     status:
-      row.status === "sent" || row.status === "cancelled"
+      row.status === "sending" || row.status === "sent" || row.status === "cancelled"
         ? row.status
         : "pending",
     createdAt: row.created_at,
@@ -994,7 +996,7 @@ export function getReminder(id: number) {
         WHERE id = ?
       `,
     )
-    .get(id) as Parameters<typeof toReminder>[0] | undefined;
+    .get(id) as ReminderRow | undefined;
 
   return row ? toReminder(row) : null;
 }
@@ -1034,34 +1036,48 @@ export function cancelReminder(id: number) {
   return updateReminder({ id, status: "cancelled" });
 }
 
-export function getDueDiscordReminders(nowIso: string) {
-  const rows = db
-    .prepare(
-      `
+function claimDueReminders(platform: string, nowIso: string) {
+  const claim = db.transaction(() => {
+    const now = new Date().toISOString();
+    const rows = db
+      .prepare(
+        `
         SELECT id, platform, guild_id, channel_id, author_id, author_mention, title, message, remind_at, status, created_at, updated_at, sent_at
         FROM reminders
         WHERE platform = ? AND status = ? AND remind_at <= ?
         ORDER BY remind_at ASC, id ASC
       `,
-    )
-    .all("discord", "pending", nowIso) as Parameters<typeof toReminder>[0][];
+      )
+      .all(platform, "pending", nowIso) as ReminderRow[];
+    const claimed: Reminder[] = [];
+    const update = db.prepare(
+      `
+        UPDATE reminders
+        SET status = ?, updated_at = ?
+        WHERE id = ? AND status = ?
+      `,
+    );
 
-  return rows.map(toReminder);
+    for (const row of rows) {
+      const result = update.run("sending", now, row.id, "pending");
+
+      if (result.changes === 1) {
+        claimed.push(toReminder({ ...row, status: "sending", updated_at: now }));
+      }
+    }
+
+    return claimed;
+  });
+
+  return claim();
 }
 
-export function getDueSlackReminders(nowIso: string) {
-  const rows = db
-    .prepare(
-      `
-        SELECT id, platform, guild_id, channel_id, author_id, author_mention, title, message, remind_at, status, created_at, updated_at, sent_at
-        FROM reminders
-        WHERE platform = ? AND status = ? AND remind_at <= ?
-        ORDER BY remind_at ASC, id ASC
-      `,
-    )
-    .all("slack", "pending", nowIso) as Parameters<typeof toReminder>[0][];
+export function claimDueDiscordReminders(nowIso: string) {
+  return claimDueReminders("discord", nowIso);
+}
 
-  return rows.map(toReminder);
+export function claimDueSlackReminders(nowIso: string) {
+  return claimDueReminders("slack", nowIso);
 }
 
 export function markReminderSent(id: number) {
@@ -1071,9 +1087,23 @@ export function markReminderSent(id: number) {
     `
       UPDATE reminders
       SET status = ?, sent_at = ?, updated_at = ?
-      WHERE id = ?
+      WHERE id = ? AND status = ?
     `,
-  ).run("sent", now, now, id);
+  ).run("sent", now, now, id, "sending");
+
+  return getReminder(id);
+}
+
+export function releaseReminderClaim(id: number) {
+  const now = new Date().toISOString();
+
+  db.prepare(
+    `
+      UPDATE reminders
+      SET status = ?, updated_at = ?
+      WHERE id = ? AND status = ?
+    `,
+  ).run("pending", now, id, "sending");
 
   return getReminder(id);
 }

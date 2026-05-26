@@ -2,6 +2,7 @@ import { ChromaClient, type Where } from "chromadb";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { embedTexts, getEmbeddingConfig, getKnowledgeCollectionName } from "./embeddings.js";
 
 export type ExtractedMarkdownFile = {
   filePath: string;
@@ -19,23 +20,8 @@ type MarkdownChunk = {
   chunkIndex: number;
 };
 
-type Pipeline = (input: string | string[], options?: Record<string, unknown>) => Promise<unknown>;
-
-let embeddingPipeline: Promise<Pipeline> | null = null;
-
 const chromaHost = process.env.CHROMA_HOST ?? "127.0.0.1";
 const chromaPort = Number(process.env.CHROMA_PORT ?? 8000);
-const embeddingModel = "nomic-ai/nomic-embed-text-v1.5";
-const embeddingPrefix = "search_document";
-const embeddingQuantized = process.env.EMBEDDING_QUANTIZED !== "false";
-
-function getCollectionName(contextId: string, platform: "discord" | "slack") {
-  if (platform === "slack") {
-    return `slack_workspace_${contextId}`;
-  }
-
-  return `discord_guild_${contextId}`;
-}
 
 function stableId(...parts: string[]) {
   return crypto.createHash("sha256").update(parts.join("\0")).digest("hex");
@@ -43,51 +29,6 @@ function stableId(...parts: string[]) {
 
 function hashContent(content: string) {
   return crypto.createHash("sha256").update(content).digest("hex");
-}
-
-async function getPipeline() {
-  if (!embeddingPipeline) {
-    embeddingPipeline = import("@xenova/transformers").then(async ({ env, pipeline }) => {
-      env.allowLocalModels = true;
-      return pipeline("feature-extraction", embeddingModel, {
-        quantized: embeddingQuantized,
-      }) as Promise<Pipeline>;
-    });
-  }
-
-  return embeddingPipeline;
-}
-
-function flattenEmbedding(output: unknown) {
-  if (
-    typeof output === "object" &&
-    output !== null &&
-    "tolist" in output &&
-    typeof (output as { tolist: unknown }).tolist === "function"
-  ) {
-    const value = (output as { tolist: () => unknown }).tolist();
-    if (Array.isArray(value) && Array.isArray(value[0])) {
-      return value[0] as number[];
-    }
-    return value as number[];
-  }
-
-  throw new Error("Embedding model returned an unsupported output shape.");
-}
-
-async function embedTexts(texts: string[]) {
-  const extractor = await getPipeline();
-  const embeddings: number[][] = [];
-
-  for (const text of texts) {
-    const output = await extractor(`${embeddingPrefix}: ${text}`, {
-      pooling: "mean",
-      normalize: true,
-    });
-    embeddings.push(flattenEmbedding(output));
-  }
-
-  return embeddings;
 }
 
 export async function collectMarkdownFiles(
@@ -162,6 +103,16 @@ export function getMarkdownSignature(manifest: MarkdownManifest) {
   return hashContent(stringifyMarkdownManifest(manifest));
 }
 
+export function getKnowledgeIndexSignature(manifest: MarkdownManifest) {
+  return `v2:${getEmbeddingConfig().signature}:${getMarkdownSignature(manifest)}`;
+}
+
+export function getEmbeddingSignatureFromKnowledgeIndexSignature(value: string | null) {
+  const parts = value?.split(":");
+
+  return parts?.[0] === "v2" && parts[1] ? parts[1] : null;
+}
+
 export function diffMarkdownManifests(previous: MarkdownManifest | null, current: MarkdownManifest) {
   const changedOrAdded = Object.entries(current)
     .filter(([relativePath, hash]) => previous?.[relativePath] !== hash)
@@ -226,7 +177,8 @@ export async function indexRepositoryMarkdown(input: {
   removedPaths?: string[];
   replaceSource?: boolean;
 }) {
-  const collectionName = getCollectionName(input.contextId, input.platform);
+  const embeddingConfig = getEmbeddingConfig();
+  const collectionName = getKnowledgeCollectionName(input.contextId, input.platform);
   const client = new ChromaClient({ host: chromaHost, port: chromaPort });
   const collection = await client.getOrCreateCollection({
     name: collectionName,
@@ -235,9 +187,7 @@ export async function indexRepositoryMarkdown(input: {
       contextPlatform: input.platform,
       guildId: input.contextId,
       workspaceId: input.platform === "slack" ? input.contextId : "",
-      embeddingModel,
-      embeddingPrefix,
-      embeddingQuantized: String(embeddingQuantized),
+      ...embeddingConfig.metadata,
     },
     embeddingFunction: null,
   });
@@ -274,7 +224,7 @@ export async function indexRepositoryMarkdown(input: {
     await collection.add({
       ids: batch.map((chunk) => `${input.sourceId}:${chunk.id}`),
       documents: batch.map((chunk) => chunk.text),
-      embeddings: await embedTexts(batch.map((chunk) => chunk.text)),
+      embeddings: await embedTexts(batch.map((chunk) => chunk.text), "document"),
       metadatas: batch.map((chunk) => ({
         platform: "github",
         contextPlatform: input.platform,
@@ -284,9 +234,7 @@ export async function indexRepositoryMarkdown(input: {
         repoFullName: input.repoFullName,
         relativePath: chunk.relativePath,
         chunkIndex: chunk.chunkIndex,
-        embeddingModel,
-        embeddingPrefix,
-        embeddingQuantized: String(embeddingQuantized),
+        ...embeddingConfig.metadata,
       })),
     });
   }

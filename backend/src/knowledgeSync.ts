@@ -10,11 +10,13 @@ import {
   buildMarkdownManifest,
   collectMarkdownFiles,
   diffMarkdownManifests,
-  getMarkdownSignature,
+  getEmbeddingSignatureFromKnowledgeIndexSignature,
+  getKnowledgeIndexSignature,
   indexRepositoryMarkdown,
   parseMarkdownManifest,
   stringifyMarkdownManifest,
 } from "./knowledgeIndex.js";
+import { getEmbeddingConfig } from "./embeddings.js";
 import { cloneOrUpdateRepo, getGuildRepoClonePath, getRepoContextPlatformFromPath } from "./repoClones.js";
 
 const defaultSyncIntervalMs = 60 * 60 * 1000;
@@ -40,8 +42,13 @@ function shouldFullReindex(input: {
   hadClone: boolean;
   previousManifest: ReturnType<typeof parseMarkdownManifest>;
   changedMarkdownPaths: string[];
+  embeddingChanged: boolean;
 }) {
   if (!input.hadClone || !input.source.indexedAt) {
+    return true;
+  }
+
+  if (input.embeddingChanged) {
     return true;
   }
 
@@ -75,9 +82,13 @@ async function syncKnowledgeSource(source: GuildKnowledgeSource) {
   const files = await collectMarkdownFiles(clone.clonePath);
   const manifest = buildMarkdownManifest(files);
   const manifestJson = stringifyMarkdownManifest(manifest);
-  const signature = getMarkdownSignature(manifest);
+  const signature = getKnowledgeIndexSignature(manifest);
   const previousManifest = parseMarkdownManifest(source.markdownManifest);
   const previousSignature = source.markdownSignature;
+  const previousEmbeddingSignature = getEmbeddingSignatureFromKnowledgeIndexSignature(previousSignature);
+  const embeddingChanged = Boolean(
+    previousManifest && previousEmbeddingSignature !== getEmbeddingConfig().signature,
+  );
 
   if (previousSignature === signature && previousManifest) {
     return {
@@ -95,6 +106,7 @@ async function syncKnowledgeSource(source: GuildKnowledgeSource) {
     hadClone: clone.existed,
     previousManifest,
     changedMarkdownPaths: clone.changedMarkdownPaths,
+    embeddingChanged,
   });
 
   if (!previousManifest && !fullReindex && source.indexedAt) {

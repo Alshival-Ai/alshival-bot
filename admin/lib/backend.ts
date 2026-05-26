@@ -130,3 +130,9 @@ export async function generateAgentResponse(input: string) {
     body: JSON.stringify({ input, source: "admin" }),
   });
 }
+
+export async function triggerKnowledgeSync() {
+  return requestBackendJson<{ queued: boolean }>("/knowledge/sync", {
+    method: "POST",
+  });
+}

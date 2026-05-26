@@ -5,11 +5,11 @@ import {
   getGuildKnowledgeSourceByRepo,
   getGuildKnowledgeSource,
   getGuildKnowledgeSources,
-  updateGuildKnowledgeIndexMetadata,
 } from "@/lib/db";
 import { cloneOrUpdateRepo, deleteRepoClone } from "@/lib/repoClones";
-import { deleteRepositoryVectors, indexRepositoryMarkdown } from "@/lib/vectorIndex";
+import { deleteRepositoryVectors } from "@/lib/vectorIndex";
 import { normalizeGithubRemoteOrigin } from "@/lib/githubRemote";
+import { triggerKnowledgeSync } from "@/lib/backend";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,6 +17,13 @@ export const dynamic = "force-dynamic";
 type RouteContext = {
   params: Promise<{ workspaceId: string }>;
 };
+
+function queueKnowledgeSync() {
+  void triggerKnowledgeSync().catch((error) => {
+    const message = error instanceof Error ? error.message : "Unknown knowledge sync trigger error.";
+    console.warn(`Could not trigger knowledge sync: ${message}`);
+  });
+}
 
 export async function GET(_request: NextRequest, context: RouteContext) {
   const { workspaceId } = await context.params;
@@ -80,29 +87,59 @@ export async function POST(request: NextRequest, context: RouteContext) {
       throw new Error("Could not save knowledge source metadata.");
     }
 
-    const indexResult = await indexRepositoryMarkdown({
-      guildId: workspaceId,
-      sourceId: source.id,
-      repoFullName: source.repoFullName,
-      clonePath,
-      platform: "slack",
-    });
-
-    updateGuildKnowledgeIndexMetadata({
-      guildId: workspaceId,
-      sourceId: source.id,
-      vectorCollection: indexResult.collectionName,
-      indexedMarkdownFiles: indexResult.markdownFiles,
-      indexedChunks: indexResult.chunks,
-    });
+    queueKnowledgeSync();
 
     return NextResponse.json({
       sources: getGuildKnowledgeSources(workspaceId),
-      index: indexResult,
+      sync: { queued: true },
     });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Could not clone repository." },
+      { status: 400 },
+    );
+  }
+}
+
+export async function PATCH(request: NextRequest, context: RouteContext) {
+  const { workspaceId } = await context.params;
+  const sourceIdParam = new URL(request.url).searchParams.get("sourceId");
+  const sourceId = Number(sourceIdParam);
+
+  if (!sourceIdParam || !Number.isInteger(sourceId) || sourceId <= 0) {
+    return NextResponse.json({ error: "sourceId is required." }, { status: 400 });
+  }
+
+  try {
+    const source = getGuildKnowledgeSource(workspaceId, sourceId);
+
+    if (!source) {
+      return NextResponse.json({ error: "Knowledge source was not found." }, { status: 404 });
+    }
+
+    const clonePath = await cloneOrUpdateRepo({
+      guildId: workspaceId,
+      repoFullName: source.repoFullName,
+      repoSshUrl: source.repoSshUrl,
+      platform: "slack",
+    });
+    addGuildKnowledgeSource({
+      guildId: workspaceId,
+      repoFullName: source.repoFullName,
+      repoSshUrl: source.repoSshUrl,
+      repoHtmlUrl: source.repoHtmlUrl,
+      clonePath,
+      private: source.private,
+    });
+    queueKnowledgeSync();
+
+    return NextResponse.json({
+      sources: getGuildKnowledgeSources(workspaceId),
+      sync: { queued: true },
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Could not pull knowledge source changes." },
       { status: 400 },
     );
   }
@@ -120,7 +157,12 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     const source = getGuildKnowledgeSource(workspaceId, sourceId);
 
     if (source) {
-      await deleteRepositoryVectors({ guildId: workspaceId, sourceId: source.id, platform: "slack" });
+      await deleteRepositoryVectors({
+        guildId: workspaceId,
+        sourceId: source.id,
+        platform: "slack",
+        collectionName: source.vectorCollection,
+      });
     }
 
     if (source?.clonePath) {

@@ -83,6 +83,20 @@ async function handleAgentRoute(request: IncomingMessage, response: ServerRespon
   sendJson(response, 200, result);
 }
 
+async function handleKnowledgeSyncRoute(request: IncomingMessage, response: ServerResponse) {
+  if (request.method !== "POST") {
+    methodNotAllowed(response);
+    return;
+  }
+
+  void knowledgeSyncService.run().catch((error) => {
+    const message = error instanceof Error ? error.message : "Unknown knowledge sync error.";
+    console.error(`Knowledge sync trigger failed: ${message}`);
+  });
+
+  sendJson(response, 202, { queued: true });
+}
+
 async function handlePlatformRoute(
   request: IncomingMessage,
   response: ServerResponse,
@@ -212,6 +226,11 @@ const server = createServer((request, response) => {
 
     if (url.pathname === "/agent/respond") {
       await handleAgentRoute(request, response);
+      return;
+    }
+
+    if (url.pathname === "/knowledge/sync") {
+      await handleKnowledgeSyncRoute(request, response);
       return;
     }
 

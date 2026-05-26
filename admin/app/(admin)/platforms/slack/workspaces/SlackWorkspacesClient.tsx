@@ -33,6 +33,8 @@ type WorkspaceKnowledgeSource = {
   repoFullName: string;
   repoSshUrl: string;
   repoHtmlUrl: string;
+  indexedAt: string | null;
+  indexedMarkdownFiles: number;
   private: boolean;
   createdAt: string;
 };
@@ -471,7 +473,7 @@ export default function SlackWorkspacesClient() {
       setKnowledgeSources(data.sources ?? []);
       setSelectedRepoFullName("");
       setRemoteOrigin("");
-      setKnowledgeStatus("Knowledge source added.");
+      setKnowledgeStatus("Knowledge source added. Indexing is running in the background.");
     } catch (error) {
       setKnowledgeStatus(error instanceof Error ? error.message : "Could not add knowledge source.");
     } finally {
@@ -505,6 +507,45 @@ export default function SlackWorkspacesClient() {
       setKnowledgeStatus("Knowledge source removed.");
     } catch (error) {
       setKnowledgeStatus(error instanceof Error ? error.message : "Could not remove knowledge source.");
+    } finally {
+      setIsKnowledgeLoading(false);
+    }
+  }
+
+  async function pullKnowledgeSource(sourceId: number) {
+    if (!selectedWorkspace) {
+      return;
+    }
+
+    setIsKnowledgeLoading(true);
+    setKnowledgeStatus("Pulling knowledge source changes...");
+
+    try {
+      const response = await fetch(
+        `/api/platforms/slack/workspaces/${selectedWorkspace.id}/knowledge?sourceId=${sourceId}`,
+        { method: "PATCH" },
+      );
+      const data = (await response.json()) as {
+        sources?: WorkspaceKnowledgeSource[];
+        index?: { markdownFiles: number; chunks: number };
+        sync?: { queued: boolean };
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not pull knowledge source changes.");
+      }
+
+      setKnowledgeSources(data.sources ?? []);
+      setKnowledgeStatus(
+        data.index
+          ? `Pulled changes and indexed ${data.index.markdownFiles} Markdown file${data.index.markdownFiles === 1 ? "" : "s"}.`
+          : data.sync?.queued
+            ? "Knowledge source changes pulled. Indexing is running in the background."
+            : "Knowledge source changes pulled.",
+      );
+    } catch (error) {
+      setKnowledgeStatus(error instanceof Error ? error.message : "Could not pull knowledge source changes.");
     } finally {
       setIsKnowledgeLoading(false);
     }
@@ -844,16 +885,34 @@ export default function SlackWorkspacesClient() {
               <div className="knowledge-source-list">
                 {knowledgeSources.map((source) => (
                   <div className="knowledge-source-row" key={source.id}>
-                    <span>{source.repoFullName}</span>
-                    <button
-                      className="secondary-action fit-content"
-                      disabled={isKnowledgeLoading}
-                      onClick={() => void removeKnowledgeSource(source.id)}
-                      type="button"
-                    >
-                      <Trash2 size={16} />
-                      Remove
-                    </button>
+                    <span>
+                      <strong>{source.repoFullName}</strong>
+                      <small>
+                        {source.indexedAt
+                          ? `Indexed ${source.indexedMarkdownFiles} Markdown file${source.indexedMarkdownFiles === 1 ? "" : "s"}`
+                          : "Not indexed yet"}
+                      </small>
+                    </span>
+                    <div className="button-row">
+                      <button
+                        className="secondary-action fit-content"
+                        disabled={isKnowledgeLoading}
+                        onClick={() => void pullKnowledgeSource(source.id)}
+                        type="button"
+                      >
+                        <RefreshCw size={16} />
+                        Pull Changes
+                      </button>
+                      <button
+                        className="secondary-action fit-content"
+                        disabled={isKnowledgeLoading}
+                        onClick={() => void removeKnowledgeSource(source.id)}
+                        type="button"
+                      >
+                        <Trash2 size={16} />
+                        Remove
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
