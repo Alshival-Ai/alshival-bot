@@ -1,4 +1,4 @@
-import { Client, Events, GatewayIntentBits } from "discord.js";
+import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
 import { generateAgentResponse } from "../agent.js";
 import {
   claimDueDiscordReminders,
@@ -10,6 +10,7 @@ import {
   type Reminder,
 } from "../db.js";
 import type { DiscordGuildSummary, PlatformAdapter, PlatformStatus } from "./types.js";
+import { containsAlshivalKeyword, containsDiscordUserMention } from "./triggers.js";
 
 const discordMessageLimit = 2000;
 const discordMessageTarget = 1900;
@@ -321,8 +322,10 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent,
       ],
+      partials: [Partials.Channel],
     });
 
     this.client.once(Events.ClientReady, (client) => {
@@ -341,16 +344,17 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
 
     this.client.on(Events.MessageCreate, (message) => {
       void (async () => {
-        if (message.author.bot || !message.guildId) {
+        if (message.author.bot) {
           return;
         }
 
         const sentAt = message.createdAt.toISOString();
         const authorDisplayName = message.member?.displayName ?? message.author.displayName ?? message.author.username;
         const authorMention = `<@${message.author.id}>`;
+        const conversationId = message.guildId ?? `dm:${message.channelId}`;
 
         saveDiscordChannelMessage({
-          guildId: message.guildId,
+          guildId: conversationId,
           channelId: message.channelId,
           messageId: message.id,
           role: "user",
@@ -363,20 +367,22 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
         });
 
         const botUserId = this.client?.user?.id;
-        const mentionsBotUser = botUserId ? message.mentions.users.has(botUserId) : false;
+        const mentionsBotUser =
+          (botUserId ? message.mentions.users.has(botUserId) : false) ||
+          containsDiscordUserMention(message.content, botUserId);
         const mentionsBotRole =
           message.guild?.members.me?.roles.cache.some((role) => message.mentions.roles.has(role.id)) ?? false;
-        const namesBot = message.content.toLowerCase().includes("alshival");
+        const namesBot = containsAlshivalKeyword(message.content);
 
         if (!mentionsBotUser && !mentionsBotRole && !namesBot) {
           return;
         }
 
-        console.log(`Discord trigger matched in guild ${message.guildId ?? "dm"} channel ${message.channelId}`);
+        console.log(`Discord trigger matched in guild ${conversationId} channel ${message.channelId}`);
         const response = await generateAgentResponse({
           input: message.content,
           source: "discord",
-          guildId: message.guildId,
+          guildId: conversationId,
           channelId: message.channelId,
           messageId: message.id,
           authorId: message.author.id,
@@ -411,7 +417,7 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
         }
 
         saveDiscordChannelMessage({
-          guildId: message.guildId,
+          guildId: conversationId,
           channelId: message.channelId,
           messageId: reply.id,
           role: "assistant",

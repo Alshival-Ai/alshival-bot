@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Bot, Building2, KeyRound, Plus, Power, RefreshCw, RotateCcw, Save, Trash2 } from "lucide-react";
+import AsanaChannelScopes, { type AsanaChannelOption } from "@/app/components/AsanaChannelScopes";
 
 type SlackWorkspaceSummary = {
   id: string;
@@ -15,6 +16,14 @@ type SlackWorkspaceSummary = {
   ready: boolean;
   botName: string | null;
   error?: string;
+};
+
+type SlackChannelSummary = {
+  id: string;
+  name: string;
+  isPrivate: boolean;
+  isArchived: boolean;
+  memberCount: number | null;
 };
 
 type GithubRepoSummary = {
@@ -51,6 +60,7 @@ type WorkspaceAgentConfig = {
 
 export default function SlackWorkspacesClient() {
   const [workspaces, setWorkspaces] = useState<SlackWorkspaceSummary[]>([]);
+  const [channels, setChannels] = useState<SlackChannelSummary[]>([]);
   const [repos, setRepos] = useState<GithubRepoSummary[]>([]);
   const [knowledgeSources, setKnowledgeSources] = useState<WorkspaceKnowledgeSource[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
@@ -69,7 +79,9 @@ export default function SlackWorkspacesClient() {
   const [workspaceAgentStatus, setWorkspaceAgentStatus] = useState("Select a workspace to manage agent overrides.");
   const [historyStatus, setHistoryStatus] = useState("Clear stored memory for this workspace when needed.");
   const [knowledgeStatus, setKnowledgeStatus] = useState("Select a workspace to manage knowledge.");
+  const [channelStatus, setChannelStatus] = useState("Select a workspace to load Slack channels.");
   const [isLoading, setIsLoading] = useState(true);
+  const [isChannelsLoading, setIsChannelsLoading] = useState(false);
   const [isConnectionSaving, setIsConnectionSaving] = useState(false);
   const [isRuntimeUpdating, setIsRuntimeUpdating] = useState(false);
   const [isWorkspaceAgentSaving, setIsWorkspaceAgentSaving] = useState(false);
@@ -82,6 +94,22 @@ export default function SlackWorkspacesClient() {
       workspaces[0] ??
       null,
     [workspaces, selectedWorkspaceId],
+  );
+
+  const asanaChannelOptions = useMemo<AsanaChannelOption[]>(
+    () =>
+      channels.map((channel) => ({
+        id: channel.id,
+        name: `#${channel.name}`,
+        description: [
+          channel.isPrivate ? "private" : "public",
+          channel.isArchived ? "archived" : null,
+          typeof channel.memberCount === "number" ? `${channel.memberCount} members` : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      })),
+    [channels],
   );
 
   async function loadWorkspaces() {
@@ -291,6 +319,33 @@ export default function SlackWorkspacesClient() {
       setKnowledgeStatus(error instanceof Error ? error.message : "Could not load knowledge sources.");
     } finally {
       setIsKnowledgeLoading(false);
+    }
+  }
+
+  async function loadChannels(workspaceId: string) {
+    setIsChannelsLoading(true);
+    setChannelStatus("Loading Slack channels...");
+
+    try {
+      const response = await fetch(`/api/platforms/slack/channels?workspaceId=${encodeURIComponent(workspaceId)}`);
+      const data = (await response.json()) as { channels?: SlackChannelSummary[]; error?: string };
+
+      if (!response.ok) {
+        throw new Error(data.error ?? "Could not load Slack channels.");
+      }
+
+      const nextChannels = data.channels ?? [];
+      setChannels(nextChannels);
+      setChannelStatus(
+        nextChannels.length
+          ? `${nextChannels.length} Slack channel${nextChannels.length === 1 ? "" : "s"} available for Asana scopes.`
+          : "No Slack channels available for this workspace.",
+      );
+    } catch (error) {
+      setChannels([]);
+      setChannelStatus(error instanceof Error ? error.message : "Could not load Slack channels.");
+    } finally {
+      setIsChannelsLoading(false);
     }
   }
 
@@ -563,8 +618,14 @@ export default function SlackWorkspacesClient() {
   useEffect(() => {
     if (selectedWorkspace?.id) {
       void Promise.resolve().then(async () => {
+        await loadChannels(selectedWorkspace.id);
         await loadKnowledgeSources(selectedWorkspace.id);
         await loadWorkspaceAgentConfig(selectedWorkspace.id);
+      });
+    } else {
+      void Promise.resolve().then(() => {
+        setChannels([]);
+        setChannelStatus("Select a workspace to load Slack channels.");
       });
     }
   }, [selectedWorkspace?.id]);
@@ -917,6 +978,15 @@ export default function SlackWorkspacesClient() {
                 ))}
               </div>
             </div>
+
+            <AsanaChannelScopes
+              channelOptions={asanaChannelOptions}
+              disabled={!selectedWorkspace}
+              endpoint={selectedWorkspace ? `/api/platforms/slack/workspaces/${selectedWorkspace.id}/asana` : null}
+            />
+            <p className="status-copy">
+              {isChannelsLoading ? "Loading Slack channels..." : channelStatus}
+            </p>
           </div>
         </section>
       </div>

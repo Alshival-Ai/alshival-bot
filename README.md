@@ -227,6 +227,7 @@ app_mentions:read
 chat:write
 channels:read
 channels:history
+files:read
 groups:read
 groups:history
 im:read
@@ -236,6 +237,9 @@ mpim:history
 team:read
 users:read
 ```
+
+`files:read` is required for the bot to read Slack uploads such as PDFs, Word documents,
+spreadsheets, images, CSVs, and text files.
 
 Optional scopes:
 

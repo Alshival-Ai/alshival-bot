@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bot, CheckCircle2, ChevronRight, MessageSquare, Plug, Settings, Wrench } from "lucide-react";
+import { Bot, CheckCircle2, ChevronRight, ListChecks, MessageSquare, Plug, Settings, Wrench } from "lucide-react";
 import logo from "../../logo.png";
 
 export default function AdminShell({ children }: { children: React.ReactNode }) {
@@ -13,6 +13,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   const isDiscordRoute = pathname.startsWith("/platforms/discord");
   const isGithubRoute = pathname.startsWith("/platforms/github");
   const isSlackRoute = pathname.startsWith("/platforms/slack");
+  const isAsanaRoute = pathname.startsWith("/platforms/asana");
 
   return (
     <main className="admin-shell">
@@ -148,6 +149,26 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
                     pathname === "/platforms/github/global-settings" ? "active" : ""
                   }`}
                   href="/platforms/github/global-settings"
+                >
+                  Global Settings
+                </Link>
+              </div>
+            ) : null}
+            <Link
+              className={`nav-item nested ${isAsanaRoute ? "selected" : ""}`}
+              href="/platforms/asana/global-settings"
+            >
+              <ListChecks size={17} />
+              <span>Asana</span>
+              <ChevronRight size={15} />
+            </Link>
+            {isAsanaRoute ? (
+              <div className="nav-subgroup" aria-label="Asana navigation">
+                <Link
+                  className={`nav-subitem ${
+                    pathname === "/platforms/asana/global-settings" ? "active" : ""
+                  }`}
+                  href="/platforms/asana/global-settings"
                 >
                   Global Settings
                 </Link>

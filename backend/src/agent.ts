@@ -1,5 +1,7 @@
 import {
   getDiscordChannelHistory,
+  getAsanaChannelScope,
+  createAsanaToolRun,
   getSlackChannelHistory,
   getGuildKnowledgeSources,
   getLanguageModelSettingsUnsafe,
@@ -7,13 +9,35 @@ import {
   resolveAgentConfig,
   type DiscordChannelMessage,
   type SlackChannelMessage,
+  type AsanaChannelScope,
 } from "./db.js";
+import {
+  addAsanaDependency,
+  addAsanaTaskComment,
+  createAsanaTask,
+  getAsanaAttachments,
+  getAsanaBoard,
+  getAsanaDependencies,
+  getAsanaProjectStatus,
+  getAsanaSubtasks,
+  getAsanaTask,
+  getAsanaTaskStories,
+  listAsanaBoards,
+  listAsanaProjectSections,
+  listAsanaProjectTasks,
+  listAsanaWorkspaceMembers,
+  moveAsanaTaskToSection,
+  removeAsanaDependency,
+  searchAsanaProjectTasks,
+  updateAsanaTask,
+} from "./asana.js";
 import { searchDiscordGuildCode, searchSlackWorkspaceCode } from "./codeSearch.js";
 import { deleteReminder, editReminder, searchGif, setReminder } from "./mcp.js";
 import { searchDiscordGuildKb, searchSlackWorkspaceKb } from "./vectorSearch.js";
 
 export type AgentResponseInput = {
   input: string;
+  attachments?: AgentAttachment[];
   source?: string;
   guildId?: string;
   channelId?: string;
@@ -23,6 +47,15 @@ export type AgentResponseInput = {
   authorDisplayName?: string;
   authorMention?: string;
   sentAt?: string;
+};
+
+export type AgentAttachment = {
+  name: string;
+  mimeType: string;
+  size: number;
+  text?: string;
+  imageDataUrl?: string;
+  error?: string;
 };
 
 export type AgentResponse = {
@@ -51,8 +84,19 @@ type OpenAiResponse = {
 
 type OpenAiInputMessage = {
   role: "user" | "assistant";
-  content: string;
+  content: string | OpenAiContentPart[];
 };
+
+type OpenAiContentPart =
+  | {
+      type: "input_text";
+      text: string;
+    }
+  | {
+      type: "input_image";
+      image_url: string;
+      detail?: "auto" | "low" | "high";
+    };
 
 type OpenAiFunctionCallOutput = {
   type: "function_call_output";
@@ -122,6 +166,7 @@ function hasOpenAiText(response: OpenAiResponse) {
 function getEnabledOpenAiTools(input: AgentResponseInput) {
   const settings = getMcpToolSettings();
   const tools: OpenAiTool[] = [];
+  const asanaScope = getAsanaScopeForInput(input);
 
   if (input.source === "discord" && input.guildId) {
     const knowledgeSources = getGuildKnowledgeSources(input.guildId);
@@ -430,6 +475,462 @@ function getEnabledOpenAiTools(input: AgentResponseInput) {
     });
   }
 
+  if (asanaScope) {
+    tools.push(
+      {
+        type: "function",
+        name: "asana_list_boards",
+        description:
+          "List Asana boards/projects available to this channel. For specific-board scopes this returns only the configured allowed boards.",
+        parameters: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_get_board",
+        description:
+          "Get Asana board/project metadata, including workspace and URL. The backend rejects board IDs this channel is not authorized to access.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Asana board/project GID.",
+            },
+          },
+          required: ["boardId"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_list_workspace_members",
+        description:
+          "List Asana users in the workspace that owns the supplied authorized board. Use this to find assignee GIDs before assigning tasks.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Asana board/project GID.",
+            },
+            limit: {
+              type: "integer",
+              description: "Maximum number of users to return.",
+              minimum: 1,
+              maximum: 500,
+            },
+          },
+          required: ["boardId"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_list_project_tasks",
+        description:
+          "List tasks from one Asana board/project. The backend rejects board IDs this channel is not authorized to access.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Asana board/project GID.",
+            },
+            includeCompleted: {
+              type: "boolean",
+              description: "Include completed tasks. Defaults to false.",
+            },
+            limit: {
+              type: "integer",
+              description: "Maximum number of tasks to return.",
+              minimum: 1,
+              maximum: 100,
+            },
+          },
+          required: ["boardId"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_search_project_tasks",
+        description:
+          "Search task names and notes within one Asana board/project. The backend rejects board IDs this channel is not authorized to access.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Asana board/project GID.",
+            },
+            query: {
+              type: "string",
+              description: "Case-insensitive search text for task name or notes.",
+            },
+            includeCompleted: {
+              type: "boolean",
+              description: "Include completed tasks. Defaults to false.",
+            },
+            limit: {
+              type: "integer",
+              description: "Maximum number of matching tasks to return.",
+              minimum: 1,
+              maximum: 50,
+            },
+          },
+          required: ["boardId", "query"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_get_task",
+        description:
+          "Get details for an Asana task and verify it belongs to the supplied authorized board.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Authorized Asana board/project GID that should contain the task.",
+            },
+            taskGid: {
+              type: "string",
+              description: "Asana task GID.",
+            },
+          },
+          required: ["boardId", "taskGid"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_get_task_stories",
+        description:
+          "List comments/stories for an Asana task after verifying the task belongs to the supplied authorized board.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Authorized Asana board/project GID that contains the task.",
+            },
+            taskGid: {
+              type: "string",
+              description: "Asana task GID.",
+            },
+            limit: {
+              type: "integer",
+              description: "Maximum number of stories to return.",
+              minimum: 1,
+              maximum: 100,
+            },
+          },
+          required: ["boardId", "taskGid"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_list_project_sections",
+        description:
+          "List sections/columns for one Asana board/project. The backend rejects board IDs this channel is not authorized to access.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Asana board/project GID.",
+            },
+          },
+          required: ["boardId"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_get_project_status",
+        description:
+          "Get recent status updates for one Asana board/project. The backend rejects board IDs this channel is not authorized to access.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Asana board/project GID.",
+            },
+          },
+          required: ["boardId"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_get_subtasks",
+        description:
+          "List subtasks for an Asana task after verifying the parent task belongs to the supplied authorized board.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Authorized Asana board/project GID that contains the parent task.",
+            },
+            taskGid: {
+              type: "string",
+              description: "Parent Asana task GID.",
+            },
+          },
+          required: ["boardId", "taskGid"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_get_dependencies",
+        description:
+          "List dependencies for an Asana task after verifying the task belongs to the supplied authorized board.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Authorized Asana board/project GID that contains the task.",
+            },
+            taskGid: {
+              type: "string",
+              description: "Asana task GID.",
+            },
+          },
+          required: ["boardId", "taskGid"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_get_attachments",
+        description:
+          "List attachments for an Asana task after verifying the task belongs to the supplied authorized board.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Authorized Asana board/project GID that contains the task.",
+            },
+            taskGid: {
+              type: "string",
+              description: "Asana task GID.",
+            },
+          },
+          required: ["boardId", "taskGid"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_create_task",
+        description:
+          "Create a task in one authorized Asana board/project. If sectionId is provided, the backend verifies the section belongs to the board before adding the task.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Asana board/project GID.",
+            },
+            name: {
+              type: "string",
+              description: "Task name.",
+            },
+            notes: {
+              type: "string",
+              description: "Optional task notes/body.",
+            },
+            dueOn: {
+              type: "string",
+              description: "Optional due date in YYYY-MM-DD format.",
+            },
+            assigneeGid: {
+              type: "string",
+              description: "Optional Asana user GID to assign the task to.",
+            },
+            sectionId: {
+              type: "string",
+              description: "Optional Asana section GID within the same board.",
+            },
+          },
+          required: ["boardId", "name"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_update_task",
+        description:
+          "Update a task after verifying it belongs to the supplied authorized board. Blank assigneeGid clears the assignee; blank dueOn clears the due date.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Authorized Asana board/project GID that contains the task.",
+            },
+            taskGid: {
+              type: "string",
+              description: "Asana task GID.",
+            },
+            name: {
+              type: "string",
+              description: "New task name.",
+            },
+            notes: {
+              type: "string",
+              description: "New task notes/body.",
+            },
+            completed: {
+              type: "boolean",
+              description: "Set task completion state.",
+            },
+            dueOn: {
+              type: "string",
+              description: "Due date in YYYY-MM-DD format. Pass an empty string to clear.",
+            },
+            assigneeGid: {
+              type: "string",
+              description: "Asana user GID. Pass an empty string to unassign.",
+            },
+          },
+          required: ["boardId", "taskGid"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_add_task_comment",
+        description:
+          "Add a comment to an Asana task after verifying the task belongs to the supplied authorized board.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Authorized Asana board/project GID that contains the task.",
+            },
+            taskGid: {
+              type: "string",
+              description: "Asana task GID.",
+            },
+            text: {
+              type: "string",
+              description: "Comment text.",
+            },
+          },
+          required: ["boardId", "taskGid", "text"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_move_task_to_section",
+        description:
+          "Move an Asana task into a section after verifying both the task and section belong to the supplied authorized board.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Authorized Asana board/project GID that contains the task and section.",
+            },
+            taskGid: {
+              type: "string",
+              description: "Asana task GID.",
+            },
+            sectionId: {
+              type: "string",
+              description: "Asana section GID in the same board.",
+            },
+          },
+          required: ["boardId", "taskGid", "sectionId"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_add_dependency",
+        description:
+          "Add an Asana dependency after verifying both the task and dependency task belong to the supplied authorized board.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Authorized Asana board/project GID that contains both tasks.",
+            },
+            taskGid: {
+              type: "string",
+              description: "Task GID that depends on dependencyGid.",
+            },
+            dependencyGid: {
+              type: "string",
+              description: "Dependency task GID.",
+            },
+          },
+          required: ["boardId", "taskGid", "dependencyGid"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+      {
+        type: "function",
+        name: "asana_remove_dependency",
+        description:
+          "Remove an Asana dependency after verifying both the task and dependency task belong to the supplied authorized board.",
+        parameters: {
+          type: "object",
+          properties: {
+            boardId: {
+              type: "string",
+              description: "Authorized Asana board/project GID that contains both tasks.",
+            },
+            taskGid: {
+              type: "string",
+              description: "Task GID.",
+            },
+            dependencyGid: {
+              type: "string",
+              description: "Dependency task GID to remove.",
+            },
+          },
+          required: ["boardId", "taskGid", "dependencyGid"],
+          additionalProperties: false,
+        },
+        strict: false,
+      },
+    );
+  }
+
   return tools;
 }
 
@@ -460,6 +961,298 @@ async function callTool(name: string, rawArguments: string, input: AgentResponse
       query: typeof payload.query === "string" ? payload.query : "",
       limit: typeof payload.limit === "number" ? payload.limit : undefined,
     });
+  }
+
+  if (name === "asana_list_boards") {
+    return callAuditedAsanaTool(input, name, {}, () => listAsanaBoards(getRequiredAsanaScope(input)));
+  }
+
+  if (name === "asana_get_board") {
+    const payload = args && typeof args === "object" ? (args as { boardId?: unknown }) : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+
+    return callAuditedAsanaTool(input, name, { boardId }, () =>
+      getAsanaBoard({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+      }),
+    );
+  }
+
+  if (name === "asana_list_workspace_members") {
+    const payload =
+      args && typeof args === "object" ? (args as { boardId?: unknown; limit?: unknown }) : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+
+    return callAuditedAsanaTool(input, name, { boardId }, () =>
+      listAsanaWorkspaceMembers({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        limit: typeof payload.limit === "number" ? payload.limit : undefined,
+      }),
+    );
+  }
+
+  if (name === "asana_list_project_tasks") {
+    const payload =
+      args && typeof args === "object"
+        ? (args as { boardId?: unknown; includeCompleted?: unknown; limit?: unknown })
+        : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+
+    return callAuditedAsanaTool(input, name, { boardId }, () =>
+      listAsanaProjectTasks({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        includeCompleted: payload.includeCompleted === true,
+        limit: typeof payload.limit === "number" ? payload.limit : undefined,
+      }),
+    );
+  }
+
+  if (name === "asana_search_project_tasks") {
+    const payload =
+      args && typeof args === "object"
+        ? (args as { boardId?: unknown; query?: unknown; includeCompleted?: unknown; limit?: unknown })
+        : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+
+    return callAuditedAsanaTool(input, name, { boardId }, () =>
+      searchAsanaProjectTasks({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        query: typeof payload.query === "string" ? payload.query : "",
+        includeCompleted: payload.includeCompleted === true,
+        limit: typeof payload.limit === "number" ? payload.limit : undefined,
+      }),
+    );
+  }
+
+  if (name === "asana_get_task") {
+    const payload = args && typeof args === "object" ? (args as { boardId?: unknown; taskGid?: unknown }) : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+    const taskGid = typeof payload.taskGid === "string" ? payload.taskGid : "";
+
+    return callAuditedAsanaTool(input, name, { boardId, taskGid }, () =>
+      getAsanaTask({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        taskGid,
+      }),
+    );
+  }
+
+  if (name === "asana_get_task_stories") {
+    const payload =
+      args && typeof args === "object"
+        ? (args as { boardId?: unknown; taskGid?: unknown; limit?: unknown })
+        : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+    const taskGid = typeof payload.taskGid === "string" ? payload.taskGid : "";
+
+    return callAuditedAsanaTool(input, name, { boardId, taskGid }, () =>
+      getAsanaTaskStories({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        taskGid,
+        limit: typeof payload.limit === "number" ? payload.limit : undefined,
+      }),
+    );
+  }
+
+  if (name === "asana_list_project_sections") {
+    const payload = args && typeof args === "object" ? (args as { boardId?: unknown }) : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+
+    return callAuditedAsanaTool(input, name, { boardId }, () =>
+      listAsanaProjectSections({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+      }),
+    );
+  }
+
+  if (name === "asana_get_project_status") {
+    const payload = args && typeof args === "object" ? (args as { boardId?: unknown }) : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+
+    return callAuditedAsanaTool(input, name, { boardId }, () =>
+      getAsanaProjectStatus({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+      }),
+    );
+  }
+
+  if (name === "asana_get_subtasks") {
+    const payload = args && typeof args === "object" ? (args as { boardId?: unknown; taskGid?: unknown }) : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+    const taskGid = typeof payload.taskGid === "string" ? payload.taskGid : "";
+
+    return callAuditedAsanaTool(input, name, { boardId, taskGid }, () =>
+      getAsanaSubtasks({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        taskGid,
+      }),
+    );
+  }
+
+  if (name === "asana_get_dependencies") {
+    const payload = args && typeof args === "object" ? (args as { boardId?: unknown; taskGid?: unknown }) : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+    const taskGid = typeof payload.taskGid === "string" ? payload.taskGid : "";
+
+    return callAuditedAsanaTool(input, name, { boardId, taskGid }, () =>
+      getAsanaDependencies({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        taskGid,
+      }),
+    );
+  }
+
+  if (name === "asana_get_attachments") {
+    const payload = args && typeof args === "object" ? (args as { boardId?: unknown; taskGid?: unknown }) : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+    const taskGid = typeof payload.taskGid === "string" ? payload.taskGid : "";
+
+    return callAuditedAsanaTool(input, name, { boardId, taskGid }, () =>
+      getAsanaAttachments({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        taskGid,
+      }),
+    );
+  }
+
+  if (name === "asana_create_task") {
+    const payload =
+      args && typeof args === "object"
+        ? (args as {
+            boardId?: unknown;
+            name?: unknown;
+            notes?: unknown;
+            dueOn?: unknown;
+            assigneeGid?: unknown;
+            sectionId?: unknown;
+          })
+        : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+
+    return callAuditedAsanaTool(input, name, { boardId }, () =>
+      createAsanaTask({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        name: typeof payload.name === "string" ? payload.name : "",
+        notes: typeof payload.notes === "string" ? payload.notes : undefined,
+        dueOn: typeof payload.dueOn === "string" ? payload.dueOn : undefined,
+        assigneeGid: typeof payload.assigneeGid === "string" ? payload.assigneeGid : undefined,
+        sectionId: typeof payload.sectionId === "string" ? payload.sectionId : undefined,
+      }),
+    );
+  }
+
+  if (name === "asana_update_task") {
+    const payload =
+      args && typeof args === "object"
+        ? (args as {
+            boardId?: unknown;
+            taskGid?: unknown;
+            name?: unknown;
+            notes?: unknown;
+            completed?: unknown;
+            dueOn?: unknown;
+            assigneeGid?: unknown;
+          })
+        : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+    const taskGid = typeof payload.taskGid === "string" ? payload.taskGid : "";
+
+    return callAuditedAsanaTool(input, name, { boardId, taskGid }, () =>
+      updateAsanaTask({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        taskGid,
+        name: typeof payload.name === "string" ? payload.name : undefined,
+        notes: typeof payload.notes === "string" ? payload.notes : undefined,
+        completed: typeof payload.completed === "boolean" ? payload.completed : undefined,
+        dueOn: typeof payload.dueOn === "string" ? payload.dueOn : undefined,
+        assigneeGid: typeof payload.assigneeGid === "string" ? payload.assigneeGid : undefined,
+      }),
+    );
+  }
+
+  if (name === "asana_add_task_comment") {
+    const payload =
+      args && typeof args === "object"
+        ? (args as { boardId?: unknown; taskGid?: unknown; text?: unknown })
+        : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+    const taskGid = typeof payload.taskGid === "string" ? payload.taskGid : "";
+
+    return callAuditedAsanaTool(input, name, { boardId, taskGid }, () =>
+      addAsanaTaskComment({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        taskGid,
+        text: typeof payload.text === "string" ? payload.text : "",
+      }),
+    );
+  }
+
+  if (name === "asana_move_task_to_section") {
+    const payload =
+      args && typeof args === "object"
+        ? (args as { boardId?: unknown; taskGid?: unknown; sectionId?: unknown })
+        : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+    const taskGid = typeof payload.taskGid === "string" ? payload.taskGid : "";
+
+    return callAuditedAsanaTool(input, name, { boardId, taskGid }, () =>
+      moveAsanaTaskToSection({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        taskGid,
+        sectionId: typeof payload.sectionId === "string" ? payload.sectionId : "",
+      }),
+    );
+  }
+
+  if (name === "asana_add_dependency") {
+    const payload =
+      args && typeof args === "object"
+        ? (args as { boardId?: unknown; taskGid?: unknown; dependencyGid?: unknown })
+        : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+    const taskGid = typeof payload.taskGid === "string" ? payload.taskGid : "";
+
+    return callAuditedAsanaTool(input, name, { boardId, taskGid }, () =>
+      addAsanaDependency({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        taskGid,
+        dependencyGid: typeof payload.dependencyGid === "string" ? payload.dependencyGid : "",
+      }),
+    );
+  }
+
+  if (name === "asana_remove_dependency") {
+    const payload =
+      args && typeof args === "object"
+        ? (args as { boardId?: unknown; taskGid?: unknown; dependencyGid?: unknown })
+        : {};
+    const boardId = typeof payload.boardId === "string" ? payload.boardId : "";
+    const taskGid = typeof payload.taskGid === "string" ? payload.taskGid : "";
+
+    return callAuditedAsanaTool(input, name, { boardId, taskGid }, () =>
+      removeAsanaDependency({
+        scope: getRequiredAsanaScope(input),
+        boardId,
+        taskGid,
+        dependencyGid: typeof payload.dependencyGid === "string" ? payload.dependencyGid : "",
+      }),
+    );
   }
 
   if (name === "discord_guild_kb") {
@@ -593,6 +1386,101 @@ async function callTool(name: string, rawArguments: string, input: AgentResponse
   throw new Error(`Unsupported tool: ${name}`);
 }
 
+function getAsanaScopeForInput(input: AgentResponseInput) {
+  if (
+    (input.source !== "discord" && input.source !== "slack") ||
+    !input.guildId ||
+    !input.channelId
+  ) {
+    return null;
+  }
+
+  return getAsanaChannelScope({
+    platform: input.source,
+    contextId: input.guildId,
+    channelId: input.channelId,
+  });
+}
+
+function getRequiredAsanaScope(input: AgentResponseInput) {
+  const scope = getAsanaScopeForInput(input);
+
+  if (!scope) {
+    throw new Error("Asana is not enabled for this channel.");
+  }
+
+  return scope;
+}
+
+async function callAuditedAsanaTool<T>(
+  input: AgentResponseInput,
+  toolName: string,
+  target: {
+    boardId?: string;
+    taskGid?: string;
+  },
+  operation: () => Promise<T>,
+) {
+  const platform = input.source === "discord" || input.source === "slack" ? input.source : null;
+
+  try {
+    const result = await operation();
+
+    if (platform && input.guildId && input.channelId) {
+      createAsanaToolRun({
+        platform,
+        contextId: input.guildId,
+        channelId: input.channelId,
+        authorId: input.authorId,
+        authorMention: input.authorMention,
+        toolName,
+        boardId: target.boardId,
+        taskGid: target.taskGid,
+        success: true,
+      });
+    }
+
+    return result;
+  } catch (error) {
+    if (platform && input.guildId && input.channelId) {
+      createAsanaToolRun({
+        platform,
+        contextId: input.guildId,
+        channelId: input.channelId,
+        authorId: input.authorId,
+        authorMention: input.authorMention,
+        toolName,
+        boardId: target.boardId,
+        taskGid: target.taskGid,
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown Asana tool error.",
+      });
+    }
+
+    throw error;
+  }
+}
+
+function describeAsanaScope(scope: AsanaChannelScope) {
+  if (scope.mode === "all") {
+    return "This channel has access to all configured Asana boards.";
+  }
+
+  const boards = scope.boards
+    .map((board) => {
+      const name = board.boardName ? `${board.boardName} ` : "";
+      const workspace = board.workspaceName ? ` in ${board.workspaceName}` : "";
+      return `- ${name}(${board.boardId})${workspace}`;
+    })
+    .join("\n");
+
+  return [
+    "This channel is restricted to these Asana boards only:",
+    boards || "- No boards configured.",
+    "Do not answer Asana questions from any other board. If the requested board is not listed, say this channel is not authorized for that board.",
+  ].join("\n");
+}
+
 function parseReminderTime(value: string) {
   const parsed = new Date(value);
 
@@ -601,6 +1489,72 @@ function parseReminderTime(value: string) {
   }
 
   return parsed.toISOString();
+}
+
+function formatAttachmentContext(input: AgentResponseInput) {
+  const attachments = input.attachments ?? [];
+
+  if (attachments.length === 0) {
+    return "";
+  }
+
+  const sections = attachments.map((attachment, index) => {
+    const header = [
+      `Attachment ${index + 1}: ${attachment.name}`,
+      attachment.mimeType ? `type=${attachment.mimeType}` : null,
+      attachment.size ? `bytes=${attachment.size}` : null,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    if (attachment.error) {
+      return `${header}\nCould not read attachment: ${attachment.error}`;
+    }
+
+    if (attachment.text?.trim()) {
+      return `${header}\n${attachment.text.trim()}`;
+    }
+
+    if (attachment.imageDataUrl) {
+      return `${header}\nImage included as visual context.`;
+    }
+
+    return `${header}\nNo readable text extracted.`;
+  });
+
+  return `\n\nAdditional Slack context from files and links:\n${sections.join("\n\n")}`;
+}
+
+function withAttachmentContent(text: string, input: AgentResponseInput): string | OpenAiContentPart[] {
+  const attachmentContext = formatAttachmentContext(input);
+  const fullText = `${text}${attachmentContext}`;
+  const imageParts = (input.attachments ?? [])
+    .filter((attachment) => attachment.imageDataUrl)
+    .map(
+      (attachment): OpenAiContentPart => ({
+        type: "input_image",
+        image_url: attachment.imageDataUrl ?? "",
+        detail: "auto",
+      }),
+    );
+
+  if (imageParts.length === 0) {
+    return fullText;
+  }
+
+  return [{ type: "input_text", text: fullText }, ...imageParts];
+}
+
+function openAiContentTextLength(content: OpenAiInputMessage["content"]) {
+  if (typeof content === "string") {
+    return content.length;
+  }
+
+  return content.reduce(
+    (total, part) =>
+      total + (part.type === "input_text" ? part.text.length : Math.min(part.image_url.length, 2048)),
+    0,
+  );
 }
 
 function formatDiscordHistoryMessage(message: DiscordChannelMessage) {
@@ -696,7 +1650,7 @@ function getSlackInputMessages(input: AgentResponseInput) {
     return [
       {
         role: "user",
-        content: formatSlackCurrentMessage(input),
+        content: withAttachmentContent(formatSlackCurrentMessage(input), input),
       },
     ] satisfies OpenAiInputMessage[];
   }
@@ -709,10 +1663,12 @@ function getSlackInputMessages(input: AgentResponseInput) {
   return [
     {
       role: "user",
-      content:
+      content: withAttachmentContent(
         "Slack channel context for memory only. Do not copy this transcript format in your reply. " +
-        "Use Slack mention tags only when naturally addressing someone.\n" +
-        `${transcript || "No prior channel messages."}\n\n${formatSlackCurrentMessage(input)}`,
+          "Use Slack mention tags only when naturally addressing someone.\n" +
+          `${transcript || "No prior channel messages."}\n\n${formatSlackCurrentMessage(input)}`,
+        input,
+      ),
     },
   ] satisfies OpenAiInputMessage[];
 }
@@ -732,7 +1688,7 @@ function getInputMessages(input: AgentResponseInput) {
 function totalInputChars(inputMessages: OpenAiInputMessage[], instructions: string) {
   return (
     instructions.length +
-    inputMessages.reduce((total, message) => total + message.content.length, 0)
+    inputMessages.reduce((total, message) => total + openAiContentTextLength(message.content), 0)
   );
 }
 
@@ -811,13 +1767,17 @@ async function generateOpenAiResponse(input: AgentResponseInput): Promise<AgentR
     inputMessages: getInputMessages(input),
   });
   const tools = getEnabledOpenAiTools(input);
+  const asanaScope = getAsanaScopeForInput(input);
+  const asanaInstructions = asanaScope
+    ? `\n\nAsana channel access:\n${describeAsanaScope(asanaScope)}\nUse the Asana tools for Asana facts and actions. Start with asana_list_boards if you need board IDs, asana_list_project_sections if you need section IDs, and asana_list_workspace_members if you need assignee GIDs. Execute Asana writes immediately when the user's instruction is clear, and report the resulting task, comment, status, URL, or GID. Do not answer Asana board-specific questions from memory when this channel has an Asana scope.`
+    : "";
 
   const baseRequest = {
     model: config.model,
     instructions:
       tools.length > 0
-        ? `${config.instructions}\n\nCurrent time: ${new Date().toISOString()}.\nDo not include channel-history transcript prefixes, timestamps, or speaker labels in your final answer. Reply naturally as Alshival. Use platform-specific knowledge base tools when workspace or guild knowledge could help answer accurately. Use platform-specific code search tools when the user needs implementation details, exact code references, or the KB summary is not enough. Use reminder tools when the user asks you to remind them, edit a reminder, or delete a reminder. Reminder times must be absolute ISO-8601 timestamps. During casual Discord or Slack conversations, use GIFs often to express personality, reactions, humor, excitement, agreement, or encouragement. When you use a tool, use its result directly. For GIF results, include one selected GIF URL in your final answer when appropriate.`
-        : `${config.instructions}\n\nCurrent time: ${new Date().toISOString()}.\nDo not include channel-history transcript prefixes, timestamps, or speaker labels in your final answer. Reply naturally as Alshival.`,
+        ? `${config.instructions}\n\nCurrent time: ${new Date().toISOString()}.\nDo not include channel-history transcript prefixes, timestamps, or speaker labels in your final answer. Reply naturally as Alshival. Use platform-specific knowledge base tools when workspace or guild knowledge could help answer accurately. Use platform-specific code search tools when the user needs implementation details, exact code references, or the KB summary is not enough. Use reminder tools when the user asks you to remind them, edit a reminder, or delete a reminder. Reminder times must be absolute ISO-8601 timestamps. During casual Discord or Slack conversations, use GIFs often to express personality, reactions, humor, excitement, agreement, or encouragement. When you use a tool, use its result directly. For GIF results, include one selected GIF URL in your final answer when appropriate.${asanaInstructions}`
+        : `${config.instructions}\n\nCurrent time: ${new Date().toISOString()}.\nDo not include channel-history transcript prefixes, timestamps, or speaker labels in your final answer. Reply naturally as Alshival.${asanaInstructions}`,
     tools,
   };
   const response = await fetch("https://api.openai.com/v1/responses", {
@@ -943,7 +1903,7 @@ async function generateOpenAiResponse(input: AgentResponseInput): Promise<AgentR
 export async function generateAgentResponse(input: AgentResponseInput): Promise<AgentResponse> {
   const config = resolveAgentConfig(input);
 
-  if (!input.input.trim()) {
+  if (!input.input.trim() && !input.attachments?.length) {
     throw new Error("Agent input is required.");
   }
 

@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useEffect, useMemo, useState } from "react";
 import { BookOpen, Bot, Building2, Plus, RefreshCw, RotateCcw, Save, Server, Trash2 } from "lucide-react";
+import AsanaChannelScopes from "@/app/components/AsanaChannelScopes";
 
 type DiscordGuildSummary = {
   id: string;
@@ -693,6 +694,9 @@ export default function GuildsClient() {
                     </div>
                   ))}
                 </div>
+              </section>
+              <section className="knowledge-section">
+                <AsanaChannelScopes endpoint={`/api/platforms/discord/guilds/${selectedGuild.id}/asana`} />
               </section>
             </div>
           ) : (

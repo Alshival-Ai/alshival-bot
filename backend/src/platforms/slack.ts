@@ -1,5 +1,5 @@
 import { App } from "@slack/bolt";
-import { generateAgentResponse } from "../agent.js";
+import { generateAgentResponse, type AgentAttachment } from "../agent.js";
 import {
   claimDueSlackReminders,
   getPlatformSettings,
@@ -18,6 +18,9 @@ import type {
   SlackChannelSummary,
   SlackWorkspaceSummary,
 } from "./types.js";
+import { containsAlshivalKeyword, containsSlackUserMention, isSupportedSlackMessageSubtype } from "./triggers.js";
+import { extractSlackAttachments, type SlackFileAttachment } from "../slackAttachments.js";
+import { extractLinkedContext } from "../linkedContext.js";
 
 const slackMessageLimit = 40000;
 const slackMessageTarget = 3800;
@@ -31,10 +34,12 @@ type SlackMessageEvent = {
   text?: string;
   ts?: string;
   bot_id?: string;
+  files?: SlackFileAttachment[];
 };
 
 type SlackWorkspaceRuntime = {
   app: App;
+  botToken: string;
   workspaceId: string;
   workspaceName?: string;
   workspaceDomain?: string;
@@ -440,13 +445,11 @@ export class SlackPlatformAdapter implements PlatformAdapter {
   }
 
   private shouldRespond(runtime: SlackWorkspaceRuntime, message: SlackMessageEvent) {
-    const text = message.text ?? "";
-
-    if (text.toLowerCase().includes("alshival")) {
+    if (containsAlshivalKeyword(message.text)) {
       return true;
     }
 
-    return Boolean(runtime.botUserId && text.includes(`<@${runtime.botUserId}>`));
+    return containsSlackUserMention(message.text, runtime.botUserId);
   }
 
   private async getUserDisplay(runtime: SlackWorkspaceRuntime, userId: string) {
@@ -494,14 +497,21 @@ export class SlackPlatformAdapter implements PlatformAdapter {
       return;
     }
 
+    const supportedSubtype = isSupportedSlackMessageSubtype(message.subtype);
+
     if (
-      message.subtype ||
+      !supportedSubtype ||
       message.bot_id ||
       !message.channel ||
       !message.user ||
-      !message.text ||
+      (!message.text && !message.files?.length) ||
       !message.ts
     ) {
+      if (message.files?.length) {
+        console.warn(
+          `Slack file event ignored in workspace ${runtime.workspaceId}: subtype=${message.subtype ?? "none"}, channel=${message.channel ?? "unknown"}`,
+        );
+      }
       return;
     }
 
@@ -513,6 +523,9 @@ export class SlackPlatformAdapter implements PlatformAdapter {
     const sentAt = new Date(Number(message.ts.split(".")[0]) * 1000).toISOString();
     const author = await this.getUserDisplay(runtime, message.user);
     const authorMention = `<@${message.user}>`;
+    const shouldRespondToMessage = this.shouldRespond(runtime, message);
+    const attachments =
+      shouldRespondToMessage || message.files?.length ? await this.getAdditionalContext(runtime, message) : [];
 
     const savedMessage = saveSlackChannelMessage({
       workspaceId,
@@ -523,7 +536,7 @@ export class SlackPlatformAdapter implements PlatformAdapter {
       authorUsername: author.username,
       authorDisplayName: author.displayName,
       authorMention,
-      content: message.text,
+      content: this.formatPersistedMessageContent(message, attachments),
       sentAt,
     });
 
@@ -531,13 +544,19 @@ export class SlackPlatformAdapter implements PlatformAdapter {
       return;
     }
 
-    if (!this.shouldRespond(runtime, message)) {
+    if (!shouldRespondToMessage) {
+      if (message.files?.length) {
+        console.log(
+          `Slack file event saved without trigger in workspace ${workspaceId} channel ${message.channel}`,
+        );
+      }
       return;
     }
 
     console.log(`Slack trigger matched in workspace ${workspaceId} channel ${message.channel}`);
     const response = await generateAgentResponse({
-      input: message.text,
+      input: message.text ?? "",
+      attachments,
       source: "slack",
       guildId: workspaceId,
       channelId: message.channel,
@@ -588,6 +607,56 @@ export class SlackPlatformAdapter implements PlatformAdapter {
         sentAt: new Date().toISOString(),
       });
     }
+  }
+
+  private formatPersistedMessageContent(message: SlackMessageEvent, attachments: AgentAttachment[]) {
+    const text = message.text?.trim() || (message.files?.length ? "[Slack message with file attachment]" : "");
+
+    if (attachments.length === 0) {
+      return text;
+    }
+
+    const attachmentText = attachments
+      .map((attachment, index) => {
+        const header = [
+          `Attachment ${index + 1}: ${attachment.name}`,
+          attachment.mimeType ? `type=${attachment.mimeType}` : null,
+          attachment.size ? `bytes=${attachment.size}` : null,
+        ]
+          .filter(Boolean)
+          .join(" | ");
+
+        if (attachment.error) {
+          return `${header}\nCould not read attachment: ${attachment.error}`;
+        }
+
+        if (attachment.text?.trim()) {
+          return `${header}\n${attachment.text.trim()}`;
+        }
+
+        if (attachment.imageDataUrl) {
+          return `${header}\nImage included as visual context.`;
+        }
+
+        return `${header}\nNo readable text extracted.`;
+      })
+      .join("\n\n");
+
+    return `${text}\n\nPersisted Slack file/link context:\n${attachmentText}`;
+  }
+
+  private async getAdditionalContext(runtime: SlackWorkspaceRuntime, message: SlackMessageEvent): Promise<AgentAttachment[]> {
+    const [fileContext, linkContext] = await Promise.all([
+      message.files?.length
+        ? extractSlackAttachments({
+            files: message.files,
+            botToken: runtime.botToken,
+          })
+        : Promise.resolve([]),
+      message.text ? extractLinkedContext(message.text) : Promise.resolve([]),
+    ]);
+
+    return [...fileContext, ...linkContext];
   }
 
   private async startInternal() {
@@ -706,6 +775,7 @@ export class SlackPlatformAdapter implements PlatformAdapter {
 
       runtime = {
         app,
+        botToken: input.botToken,
         workspaceId,
         workspaceName: info?.name ?? auth.team ?? input.workspaceName ?? undefined,
         workspaceDomain: info?.domain ?? input.workspaceDomain ?? undefined,

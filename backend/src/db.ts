@@ -82,6 +82,54 @@ export type McpToolSettings = {
   };
 };
 
+export type AsanaBoardScope = {
+  boardId: string;
+  boardName: string | null;
+  workspaceName: string | null;
+};
+
+export type AsanaChannelScopeMode = "all" | "specific";
+
+export type AsanaChannelScope = {
+  id: number;
+  platform: "discord" | "slack";
+  contextId: string;
+  channelId: string;
+  channelName: string | null;
+  mode: AsanaChannelScopeMode;
+  boards: AsanaBoardScope[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AsanaMcpSettings = {
+  clientId: string;
+  clientSecret: string | null;
+  accessToken: string | null;
+  refreshToken: string | null;
+  accessTokenExpiresAt: string | null;
+  authorizedUserGid: string | null;
+  authorizedUserName: string | null;
+  authorizedUserEmail: string | null;
+  mcpServerUrl: string;
+  resourceUrl: string;
+  authorizationUrl: string;
+  updatedAt: string | null;
+};
+
+export type CreateAsanaToolRunInput = {
+  platform: "discord" | "slack";
+  contextId: string;
+  channelId: string;
+  authorId?: string | null;
+  authorMention?: string | null;
+  toolName: string;
+  boardId?: string | null;
+  taskGid?: string | null;
+  success: boolean;
+  error?: string | null;
+};
+
 export type GuildKnowledgeSource = {
   id: number;
   guildId: string;
@@ -194,6 +242,43 @@ db.exec(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS asana_channel_scopes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    context_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    channel_name TEXT,
+    access_mode TEXT NOT NULL,
+    boards_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(platform, context_id, channel_id)
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS asana_tool_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    context_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    author_id TEXT,
+    author_mention TEXT,
+    tool_name TEXT NOT NULL,
+    board_id TEXT,
+    task_gid TEXT,
+    success INTEGER NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL
+  )
+`);
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_asana_tool_runs_context_created
+  ON asana_tool_runs (platform, context_id, channel_id, created_at)
 `);
 
 db.exec(`
@@ -555,6 +640,227 @@ export function getMcpToolSettings(): McpToolSettings {
       updatedAt: typeof gifSearch.updatedAt === "string" ? gifSearch.updatedAt : null,
     },
   };
+}
+
+const asanaMcpDefaults = {
+  mcpServerUrl: "https://mcp.asana.com/v2/mcp",
+  resourceUrl: "https://mcp.asana.com/v2",
+  authorizationUrl: "https://app.asana.com/-/oauth_authorize",
+};
+const asanaMcpSetting = "asana_mcp_settings";
+
+function normalizeAsanaMcpSettings(settings: Partial<AsanaMcpSettings> | null): AsanaMcpSettings {
+  return {
+    clientId: typeof settings?.clientId === "string" ? settings.clientId : "",
+    clientSecret:
+      typeof settings?.clientSecret === "string" && settings.clientSecret.length > 0
+        ? settings.clientSecret
+        : null,
+    accessToken:
+      typeof settings?.accessToken === "string" && settings.accessToken.length > 0
+        ? settings.accessToken
+        : null,
+    refreshToken:
+      typeof settings?.refreshToken === "string" && settings.refreshToken.length > 0
+        ? settings.refreshToken
+        : null,
+    accessTokenExpiresAt:
+      typeof settings?.accessTokenExpiresAt === "string" ? settings.accessTokenExpiresAt : null,
+    authorizedUserGid:
+      typeof settings?.authorizedUserGid === "string" ? settings.authorizedUserGid : null,
+    authorizedUserName:
+      typeof settings?.authorizedUserName === "string" ? settings.authorizedUserName : null,
+    authorizedUserEmail:
+      typeof settings?.authorizedUserEmail === "string" ? settings.authorizedUserEmail : null,
+    mcpServerUrl:
+      typeof settings?.mcpServerUrl === "string" && settings.mcpServerUrl.trim()
+        ? settings.mcpServerUrl.trim()
+        : asanaMcpDefaults.mcpServerUrl,
+    resourceUrl:
+      typeof settings?.resourceUrl === "string" && settings.resourceUrl.trim()
+        ? settings.resourceUrl.trim()
+        : asanaMcpDefaults.resourceUrl,
+    authorizationUrl:
+      typeof settings?.authorizationUrl === "string" && settings.authorizationUrl.trim()
+        ? settings.authorizationUrl.trim()
+        : asanaMcpDefaults.authorizationUrl,
+    updatedAt: typeof settings?.updatedAt === "string" ? settings.updatedAt : null,
+  };
+}
+
+export function getAsanaMcpSettingsUnsafe() {
+  const row = db
+    .prepare("SELECT value FROM agent_settings WHERE key = ?")
+    .get(asanaMcpSetting) as { value: string } | undefined;
+
+  if (!row) {
+    return normalizeAsanaMcpSettings(null);
+  }
+
+  return normalizeAsanaMcpSettings(JSON.parse(row.value) as Partial<AsanaMcpSettings>);
+}
+
+export function saveAsanaOAuthTokens(input: {
+  accessToken: string;
+  refreshToken?: string | null;
+  expiresIn?: number | null;
+  user?: {
+    gid?: string | number | null;
+    id?: string | number | null;
+    name?: string | null;
+    email?: string | null;
+  } | null;
+}) {
+  const existing = getAsanaMcpSettingsUnsafe();
+  const updatedAt = new Date().toISOString();
+  const expiresIn =
+    typeof input.expiresIn === "number" && Number.isFinite(input.expiresIn) ? input.expiresIn : 3600;
+  const settings: AsanaMcpSettings = {
+    ...existing,
+    accessToken: input.accessToken,
+    refreshToken: input.refreshToken || existing.refreshToken,
+    accessTokenExpiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
+    authorizedUserGid:
+      input.user?.gid !== undefined && input.user?.gid !== null
+        ? String(input.user.gid)
+        : input.user?.id !== undefined && input.user?.id !== null
+          ? String(input.user.id)
+          : existing.authorizedUserGid,
+    authorizedUserName: input.user?.name ?? existing.authorizedUserName,
+    authorizedUserEmail: input.user?.email ?? existing.authorizedUserEmail,
+    updatedAt,
+  };
+
+  db.prepare(
+    `
+      INSERT INTO agent_settings (key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `,
+  ).run(asanaMcpSetting, JSON.stringify(settings), updatedAt);
+
+  return settings;
+}
+
+function normalizeAsanaBoards(value: unknown): AsanaBoardScope[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+
+      const board = entry as {
+        boardId?: unknown;
+        boardName?: unknown;
+        workspaceName?: unknown;
+      };
+      const boardId = typeof board.boardId === "string" ? board.boardId.trim() : "";
+
+      if (!boardId) {
+        return null;
+      }
+
+      return {
+        boardId,
+        boardName: typeof board.boardName === "string" && board.boardName.trim() ? board.boardName.trim() : null,
+        workspaceName:
+          typeof board.workspaceName === "string" && board.workspaceName.trim()
+            ? board.workspaceName.trim()
+            : null,
+      };
+    })
+    .filter((entry): entry is AsanaBoardScope => entry !== null);
+}
+
+function parseAsanaBoardsJson(value: string) {
+  try {
+    return normalizeAsanaBoards(JSON.parse(value));
+  } catch {
+    return [];
+  }
+}
+
+function toAsanaChannelScope(row: {
+  id: number;
+  platform: string;
+  context_id: string;
+  channel_id: string;
+  channel_name: string | null;
+  access_mode: string;
+  boards_json: string;
+  created_at: string;
+  updated_at: string;
+}): AsanaChannelScope {
+  return {
+    id: row.id,
+    platform: row.platform === "slack" ? "slack" : "discord",
+    contextId: row.context_id,
+    channelId: row.channel_id,
+    channelName: row.channel_name,
+    mode: row.access_mode === "specific" ? "specific" : "all",
+    boards: parseAsanaBoardsJson(row.boards_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getAsanaChannelScope(input: {
+  platform: "discord" | "slack";
+  contextId: string;
+  channelId: string;
+}) {
+  const row = db
+    .prepare(
+      `
+        SELECT id, platform, context_id, channel_id, channel_name, access_mode, boards_json, created_at, updated_at
+        FROM asana_channel_scopes
+        WHERE platform = ? AND context_id = ? AND channel_id = ?
+      `,
+    )
+    .get(input.platform, input.contextId, input.channelId) as
+    | Parameters<typeof toAsanaChannelScope>[0]
+    | undefined;
+
+  return row ? toAsanaChannelScope(row) : null;
+}
+
+export function createAsanaToolRun(input: CreateAsanaToolRunInput) {
+  db.prepare(
+    `
+      INSERT INTO asana_tool_runs (
+        platform,
+        context_id,
+        channel_id,
+        author_id,
+        author_mention,
+        tool_name,
+        board_id,
+        task_gid,
+        success,
+        error,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    input.platform,
+    input.contextId,
+    input.channelId,
+    input.authorId?.trim() || null,
+    input.authorMention?.trim() || null,
+    input.toolName,
+    input.boardId?.trim() || null,
+    input.taskGid?.trim() || null,
+    input.success ? 1 : 0,
+    input.error?.slice(0, 1000) || null,
+    new Date().toISOString(),
+  );
 }
 
 export function getGuildKnowledgeSources(guildId: string): GuildKnowledgeSource[] {
