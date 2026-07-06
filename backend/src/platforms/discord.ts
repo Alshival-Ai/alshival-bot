@@ -112,10 +112,11 @@ export class DiscordPlatformAdapter implements PlatformAdapter {
   private splitDiscordReply(text: string) {
     const gifUrls: string[] = [];
     const cleanedText = text
-      .replace(/https:\/\/media\.tenor\.com\/\S+\.gif(?:\?\S*)?/gi, (url) => {
+      .replace(/https:\/\/static[12]?\.klipy\.com\/\S+\.gif(?:\?\S*)?/gi, (url) => {
         gifUrls.push(url);
         return "";
       })
+      .replace(/https:\/\/(?=\S*(?:giphy\.com|tenor\.com|\.gif(?:\?\S*)?))\S+/gi, "")
       .replace(/[ \t]+\n/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim();

@@ -88,7 +88,7 @@ MSGRAPH_DELEGATED_SCOPES = os.getenv(
     "offline_access Mail.Read Mail.Send Calendars.Read",
 )
 AUTH_DB_PATH = Path(os.getenv("DJANGO_DB_PATH", PROJECT_ROOT / "db.sqlite3"))
-TENOR_API_KEY = os.getenv("TENOR_API_KEY")
+KLIPY_API_KEY = os.getenv("KLIPY_API_KEY")
 SITE_KB_PATH = os.getenv(
     "SITE_KB_PATH",
     str((Path(__file__).resolve().parent / "knowledge" / "chroma")),
@@ -4795,7 +4795,7 @@ async def update_account_settings(
 
 @mcp.tool()
 def search_gif(query: str, limit: int = 8) -> Dict[str, Any]:
-    """Search Tenor for GIFs.
+    """Search KLIPY for GIFs.
 
     Parameters:
     - query (str): Search keywords.
@@ -4808,31 +4808,44 @@ def search_gif(query: str, limit: int = 8) -> Dict[str, Any]:
         raise ValueError("query is required")
     if limit <= 0:
         raise ValueError("limit must be positive")
-    if not TENOR_API_KEY:
-        raise RuntimeError("TENOR_API_KEY is not configured")
+    if not KLIPY_API_KEY:
+        raise RuntimeError("KLIPY_API_KEY is not configured")
 
+    limit = min(limit, 50)
     params = {
+        "page": "1",
+        "per_page": str(max(8, limit)),
         "q": query.strip(),
-        "media_format": "gif",
-        "key": TENOR_API_KEY,
-        "client_key": "alshival",
-        "limit": str(min(limit, 50)),
+        "format_filter": "gif",
     }
-    resp = requests.get("https://tenor.googleapis.com/v2/search", params=params, timeout=15)
+    app_key = quote(KLIPY_API_KEY, safe="")
+    resp = requests.get(
+        f"https://api.klipy.com/api/v1/{app_key}/gifs/search",
+        params=params,
+        headers={"User-Agent": "alshival-bot/1.0"},
+        timeout=15,
+    )
     if resp.status_code >= 400:
-        raise RuntimeError(f"Tenor search failed: {resp.status_code} {resp.text}")
+        raise RuntimeError(f"KLIPY search failed: {resp.status_code} {resp.text}")
     payload = resp.json()
     results = []
-    for item in payload.get("results", []):
-        media_formats = item.get("media_formats") or {}
-        gif = media_formats.get("gif") or {}
-        url = gif.get("url")
+    response_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    items = response_data.get("data") if isinstance(response_data.get("data"), list) else []
+    for item in items:
+        file = item.get("file") if isinstance(item.get("file"), dict) else {}
+        url = None
+        for size in ("md", "hd", "sm", "xs"):
+            size_formats = file.get(size) if isinstance(file.get(size), dict) else {}
+            gif = size_formats.get("gif") if isinstance(size_formats.get("gif"), dict) else {}
+            url = gif.get("url")
+            if url:
+                break
         if not url:
             continue
         results.append(
             {
-                "id": item.get("id"),
-                "title": item.get("content_description") or item.get("title"),
+                "id": item.get("slug") or item.get("id"),
+                "title": item.get("title"),
                 "url": url,
             }
         )
@@ -4841,9 +4854,9 @@ def search_gif(query: str, limit: int = 8) -> Dict[str, Any]:
 
     return {
         "query": query,
-        "count": len(results),
-        "results": results,
-        "powered_by": "Tenor",
+        "count": len(results[:limit]),
+        "results": results[:limit],
+        "powered_by": "KLIPY",
         "ts": datetime.utcnow().isoformat() + "Z",
     }
 

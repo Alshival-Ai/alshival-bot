@@ -171,7 +171,7 @@ async function fetchUrlContext(url: string): Promise<AgentAttachment> {
 }
 
 export async function extractLinkedContext(text: string) {
-  const urls = extractHttpUrls(text).filter((url) => !/https:\/\/media\.tenor\.com\//i.test(url));
+  const urls = extractHttpUrls(text).filter((url) => !/https:\/\/static[12]?\.klipy\.com\//i.test(url));
   const results: AgentAttachment[] = [];
 
   for (const url of urls) {

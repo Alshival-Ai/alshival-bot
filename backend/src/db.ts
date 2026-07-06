@@ -75,7 +75,7 @@ export type SlackWorkspaceSettingsRow = {
 export type McpToolSettings = {
   gifSearch: {
     enabled: boolean;
-    tenorApiKey: string | null;
+    klipyApiKey: string | null;
     queryPrefix: string;
     defaultLimit: number;
     updatedAt: string | null;
@@ -607,7 +607,7 @@ export function getMcpToolSettings(): McpToolSettings {
     return {
       gifSearch: {
         enabled: false,
-        tenorApiKey: null,
+        klipyApiKey: null,
         queryPrefix: "",
         defaultLimit: 8,
         updatedAt: null,
@@ -618,19 +618,20 @@ export function getMcpToolSettings(): McpToolSettings {
   const parsed = JSON.parse(row.value) as Partial<McpToolSettings>;
   const gifSearch = parsed.gifSearch ?? {
     enabled: false,
-    tenorApiKey: null,
+    klipyApiKey: null,
     queryPrefix: "",
     defaultLimit: 8,
     updatedAt: null,
   };
+  const klipyApiKey =
+    typeof gifSearch.klipyApiKey === "string" && gifSearch.klipyApiKey.trim()
+      ? gifSearch.klipyApiKey
+      : null;
 
   return {
     gifSearch: {
       enabled: Boolean(gifSearch.enabled),
-      tenorApiKey:
-        typeof gifSearch.tenorApiKey === "string" && gifSearch.tenorApiKey.trim()
-          ? gifSearch.tenorApiKey
-          : null,
+      klipyApiKey,
       queryPrefix:
         typeof gifSearch.queryPrefix === "string" ? gifSearch.queryPrefix.trim() : "",
       defaultLimit:

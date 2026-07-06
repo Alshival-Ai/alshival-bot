@@ -448,12 +448,12 @@ function getEnabledOpenAiTools(input: AgentResponseInput) {
     );
   }
 
-  if (settings.gifSearch.enabled && settings.gifSearch.tenorApiKey) {
+  if (settings.gifSearch.enabled && settings.gifSearch.klipyApiKey) {
     tools.push({
       type: "function",
       name: "search_gif",
       description:
-        "Search Tenor for GIFs. Use this when a GIF would make the response more expressive, funny, or useful. Return a selected GIF URL in the final response.",
+        "Search KLIPY for GIFs. Use this when a GIF would make the response more expressive, funny, or useful. Return a selected GIF URL in the final response.",
       parameters: {
         type: "object",
         properties: {
@@ -1776,7 +1776,7 @@ async function generateOpenAiResponse(input: AgentResponseInput): Promise<AgentR
     model: config.model,
     instructions:
       tools.length > 0
-        ? `${config.instructions}\n\nCurrent time: ${new Date().toISOString()}.\nDo not include channel-history transcript prefixes, timestamps, or speaker labels in your final answer. Reply naturally as Alshival. Use platform-specific knowledge base tools when workspace or guild knowledge could help answer accurately. Use platform-specific code search tools when the user needs implementation details, exact code references, or the KB summary is not enough. Use reminder tools when the user asks you to remind them, edit a reminder, or delete a reminder. Reminder times must be absolute ISO-8601 timestamps. During casual Discord or Slack conversations, use GIFs often to express personality, reactions, humor, excitement, agreement, or encouragement. When you use a tool, use its result directly. For GIF results, include one selected GIF URL in your final answer when appropriate.${asanaInstructions}`
+        ? `${config.instructions}\n\nCurrent time: ${new Date().toISOString()}.\nDo not include channel-history transcript prefixes, timestamps, or speaker labels in your final answer. Reply naturally as Alshival. Use platform-specific knowledge base tools when workspace or guild knowledge could help answer accurately. Use platform-specific code search tools when the user needs implementation details, exact code references, or the KB summary is not enough. Use reminder tools when the user asks you to remind them, edit a reminder, or delete a reminder. Reminder times must be absolute ISO-8601 timestamps. During casual Discord or Slack conversations, use GIFs often to express personality, reactions, humor, excitement, agreement, or encouragement. When you use a tool, use its result directly. For GIF results, include one selected KLIPY GIF URL from the search_gif tool in your final answer when appropriate. Never include Giphy, Tenor, or invented GIF URLs.${asanaInstructions}`
         : `${config.instructions}\n\nCurrent time: ${new Date().toISOString()}.\nDo not include channel-history transcript prefixes, timestamps, or speaker labels in your final answer. Reply naturally as Alshival.${asanaInstructions}`,
     tools,
   };

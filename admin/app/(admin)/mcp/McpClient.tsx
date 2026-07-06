@@ -6,8 +6,8 @@ import { Bell, BookOpen, ImageIcon, Save, Trash2, Wrench } from "lucide-react";
 type McpSettings = {
   gifSearch: {
     enabled: boolean;
-    hasTenorApiKey: boolean;
-    tenorApiKeyLast4: string | null;
+    hasKlipyApiKey: boolean;
+    klipyApiKeyLast4: string | null;
     queryPrefix: string;
     defaultLimit: number;
     updatedAt: string | null;
@@ -17,8 +17,8 @@ type McpSettings = {
 const emptySettings: McpSettings = {
   gifSearch: {
     enabled: false,
-    hasTenorApiKey: false,
-    tenorApiKeyLast4: null,
+    hasKlipyApiKey: false,
+    klipyApiKeyLast4: null,
     queryPrefix: "",
     defaultLimit: 8,
     updatedAt: null,
@@ -29,7 +29,7 @@ export default function McpClient() {
   const [settings, setSettings] = useState<McpSettings>(emptySettings);
   const [selectedTool, setSelectedTool] = useState("search_gif");
   const [enabled, setEnabled] = useState(false);
-  const [tenorApiKey, setTenorApiKey] = useState("");
+  const [klipyApiKey, setKlipyApiKey] = useState("");
   const [queryPrefix, setQueryPrefix] = useState("");
   const [defaultLimit, setDefaultLimit] = useState(8);
   const [status, setStatus] = useState("Loading MCP tools...");
@@ -68,7 +68,7 @@ export default function McpClient() {
         body: JSON.stringify({
           gifSearch: {
             enabled,
-            tenorApiKey,
+            klipyApiKey,
             queryPrefix,
             defaultLimit,
           },
@@ -85,7 +85,7 @@ export default function McpClient() {
       setEnabled(nextSettings.gifSearch.enabled);
       setQueryPrefix(nextSettings.gifSearch.queryPrefix);
       setDefaultLimit(nextSettings.gifSearch.defaultLimit);
-      setTenorApiKey("");
+      setKlipyApiKey("");
       setStatus("MCP tool settings saved.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not save MCP tools.");
@@ -111,7 +111,7 @@ export default function McpClient() {
       setEnabled(nextSettings.gifSearch.enabled);
       setQueryPrefix(nextSettings.gifSearch.queryPrefix);
       setDefaultLimit(nextSettings.gifSearch.defaultLimit);
-      setTenorApiKey("");
+      setKlipyApiKey("");
       setStatus("MCP tool settings cleared.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not clear MCP tools.");
@@ -230,7 +230,7 @@ export default function McpClient() {
               <div className="panel-heading">
                 <div>
                   <p className="eyebrow">GIF Search</p>
-                  <h3>Tenor Configuration</h3>
+                  <h3>KLIPY Configuration</h3>
                 </div>
                 <ImageIcon size={20} />
               </div>
@@ -247,17 +247,17 @@ export default function McpClient() {
 
                 <div className="form-grid">
                   <label className="field wide">
-                    <span>Tenor API key</span>
+                    <span>KLIPY API key</span>
                     <input
                       autoComplete="off"
-                      onChange={(event) => setTenorApiKey(event.target.value)}
+                      onChange={(event) => setKlipyApiKey(event.target.value)}
                       placeholder={
-                        settings.gifSearch.hasTenorApiKey
-                          ? `Saved key ending in ${settings.gifSearch.tenorApiKeyLast4}`
-                          : "Tenor API key"
+                        settings.gifSearch.hasKlipyApiKey
+                          ? `Saved key ending in ${settings.gifSearch.klipyApiKeyLast4}`
+                          : "KLIPY API key"
                       }
                       type="password"
-                      value={tenorApiKey}
+                      value={klipyApiKey}
                     />
                   </label>
                   <label className="field">

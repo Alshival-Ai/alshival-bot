@@ -54,7 +54,7 @@ Discord and Slack are supported. The bot listens for normal messages that mentio
 - Configure default Agent provider/model
 - Configure GitHub access, PATs, and SSH keys
 - MCP admin page for local tools
-- GIF search tool through Tenor
+- GIF search tool through KLIPY
 - Reminder tools with a once-per-minute reminder delivery job
 
 ## Requirements

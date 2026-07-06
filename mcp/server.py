@@ -51,9 +51,9 @@ def _search_gif(payload: dict[str, Any]) -> dict[str, Any]:
     if not settings.get("enabled"):
         raise RuntimeError("GIF search tool is disabled.")
 
-    tenor_api_key = str(settings.get("tenorApiKey") or "").strip()
-    if not tenor_api_key:
-        raise RuntimeError("Tenor API key is not configured.")
+    klipy_api_key = str(settings.get("klipyApiKey") or "").strip()
+    if not klipy_api_key:
+        raise RuntimeError("KLIPY API key is not configured.")
 
     query = str(payload.get("query") or "").strip()
     if not query:
@@ -66,42 +66,53 @@ def _search_gif(payload: dict[str, Any]) -> dict[str, Any]:
 
     query_prefix = str(settings.get("queryPrefix") or "").strip()
     effective_query = f"{query_prefix} {query}".strip()
+    per_page = max(8, limit)
     params = urllib.parse.urlencode(
         {
+            "page": "1",
+            "per_page": str(per_page),
             "q": effective_query,
-            "media_format": "gif",
-            "key": tenor_api_key,
-            "client_key": "alshival",
-            "limit": str(limit),
+            "format_filter": "gif",
         }
     )
-    request = urllib.request.Request(f"https://tenor.googleapis.com/v2/search?{params}")
+    app_key = urllib.parse.quote(klipy_api_key, safe="")
+    request = urllib.request.Request(
+        f"https://api.klipy.com/api/v1/{app_key}/gifs/search?{params}",
+        headers={"User-Agent": "alshival-bot/1.0"},
+    )
 
     with urllib.request.urlopen(request, timeout=15) as response:
         response_payload = json.loads(response.read().decode("utf-8"))
 
     results = []
-    for item in response_payload.get("results", []):
+    response_data = response_payload.get("data") if isinstance(response_payload.get("data"), dict) else {}
+    items = response_data.get("data") if isinstance(response_data.get("data"), list) else []
+    for item in items:
         if not isinstance(item, dict):
             continue
-        media_formats = item.get("media_formats") if isinstance(item.get("media_formats"), dict) else {}
-        gif = media_formats.get("gif") if isinstance(media_formats.get("gif"), dict) else {}
-        url = gif.get("url")
+        file = item.get("file") if isinstance(item.get("file"), dict) else {}
+        url = None
+        for size in ("md", "hd", "sm", "xs"):
+            size_formats = file.get(size) if isinstance(file.get(size), dict) else {}
+            gif = size_formats.get("gif") if isinstance(size_formats.get("gif"), dict) else {}
+            url = gif.get("url")
+            if url:
+                break
         if not url:
             continue
         results.append(
             {
-                "id": item.get("id"),
-                "title": item.get("content_description") or item.get("title"),
+                "id": item.get("slug") or item.get("id"),
+                "title": item.get("title"),
                 "url": url,
             }
         )
 
     return {
         "query": effective_query,
-        "count": len(results),
-        "results": results,
-        "poweredBy": "Tenor",
+        "count": len(results[:limit]),
+        "results": results[:limit],
+        "poweredBy": "KLIPY",
         "ts": _utc_now(),
     }
 
@@ -339,7 +350,7 @@ class McpHandler(BaseHTTPRequestHandler):
                         {
                             "name": "search_gif",
                             "enabled": bool(gif_settings.get("enabled")),
-                            "description": "Search Tenor for GIFs.",
+                            "description": "Search KLIPY for GIFs.",
                         },
                         {
                             "name": "discord_guild_kb",

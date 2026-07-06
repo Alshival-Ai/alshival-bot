@@ -171,7 +171,7 @@ export type GuildAgentConfig = AgentConfig & {
 export type McpToolSettings = {
   gifSearch: {
     enabled: boolean;
-    tenorApiKey: string | null;
+    klipyApiKey: string | null;
     queryPrefix: string;
     defaultLimit: number;
     updatedAt: string | null;
@@ -181,8 +181,8 @@ export type McpToolSettings = {
 export type SafeMcpToolSettings = {
   gifSearch: {
     enabled: boolean;
-    hasTenorApiKey: boolean;
-    tenorApiKeyLast4: string | null;
+    hasKlipyApiKey: boolean;
+    klipyApiKeyLast4: string | null;
     queryPrefix: string;
     defaultLimit: number;
     updatedAt: string | null;
@@ -1366,7 +1366,7 @@ function getMcpToolSettingsUnsafe(): McpToolSettings {
     return {
       gifSearch: {
         enabled: false,
-        tenorApiKey: null,
+        klipyApiKey: null,
         queryPrefix: "",
         defaultLimit: 8,
         updatedAt: null,
@@ -1377,19 +1377,20 @@ function getMcpToolSettingsUnsafe(): McpToolSettings {
   const parsed = JSON.parse(row.value) as Partial<McpToolSettings>;
   const gifSearch = parsed.gifSearch ?? {
     enabled: false,
-    tenorApiKey: null,
+    klipyApiKey: null,
     queryPrefix: "",
     defaultLimit: 8,
     updatedAt: null,
   };
+  const klipyApiKey =
+    typeof gifSearch.klipyApiKey === "string" && gifSearch.klipyApiKey.trim()
+      ? gifSearch.klipyApiKey
+      : null;
 
   return {
     gifSearch: {
       enabled: Boolean(gifSearch.enabled),
-      tenorApiKey:
-        typeof gifSearch.tenorApiKey === "string" && gifSearch.tenorApiKey.trim()
-          ? gifSearch.tenorApiKey
-          : null,
+      klipyApiKey,
       queryPrefix:
         typeof gifSearch.queryPrefix === "string" ? gifSearch.queryPrefix.trim() : "",
       defaultLimit:
@@ -1402,13 +1403,13 @@ function getMcpToolSettingsUnsafe(): McpToolSettings {
 }
 
 function toSafeMcpToolSettings(settings: McpToolSettings): SafeMcpToolSettings {
-  const tenorApiKey = settings.gifSearch.tenorApiKey ?? "";
+  const klipyApiKey = settings.gifSearch.klipyApiKey ?? "";
 
   return {
     gifSearch: {
       enabled: settings.gifSearch.enabled,
-      hasTenorApiKey: tenorApiKey.length > 0,
-      tenorApiKeyLast4: tenorApiKey.length > 0 ? tenorApiKey.slice(-4) : null,
+      hasKlipyApiKey: klipyApiKey.length > 0,
+      klipyApiKeyLast4: klipyApiKey.length > 0 ? klipyApiKey.slice(-4) : null,
       queryPrefix: settings.gifSearch.queryPrefix,
       defaultLimit: settings.gifSearch.defaultLimit,
       updatedAt: settings.gifSearch.updatedAt,
@@ -1423,7 +1424,7 @@ export function getMcpToolSettings() {
 export function saveMcpToolSettings(input: {
   gifSearch: {
     enabled: boolean;
-    tenorApiKey: string;
+    klipyApiKey: string;
     queryPrefix: string;
     defaultLimit: number;
   };
@@ -1433,10 +1434,10 @@ export function saveMcpToolSettings(input: {
   const settings: McpToolSettings = {
     gifSearch: {
       enabled: input.gifSearch.enabled,
-      tenorApiKey:
-        input.gifSearch.tenorApiKey.trim().length > 0
-          ? input.gifSearch.tenorApiKey.trim()
-          : existing.gifSearch.tenorApiKey,
+      klipyApiKey:
+        input.gifSearch.klipyApiKey.trim().length > 0
+          ? input.gifSearch.klipyApiKey.trim()
+          : existing.gifSearch.klipyApiKey,
       queryPrefix: input.gifSearch.queryPrefix.trim(),
       defaultLimit: Math.max(1, Math.min(Math.trunc(input.gifSearch.defaultLimit || 8), 20)),
       updatedAt,
