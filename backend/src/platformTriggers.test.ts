@@ -11,11 +11,18 @@ test("containsAlshivalKeyword matches the bot name case-insensitively", () => {
   assert.equal(containsAlshivalKeyword("Alshival can you help?"), true);
   assert.equal(containsAlshivalKeyword("alshival can you help?"), true);
   assert.equal(containsAlshivalKeyword("@Alshival can you help?"), true);
+  assert.equal(containsAlshivalKeyword("Thank you, Alshival."), true);
+  assert.equal(containsAlshivalKeyword("alshival"), true);
 });
 
-test("containsAlshivalKeyword requires the bot name as a keyword", () => {
+test("containsAlshivalKeyword requires the bot name as a standalone name", () => {
   assert.equal(containsAlshivalKeyword("notalshival"), false);
   assert.equal(containsAlshivalKeyword("alshivalbot"), false);
+  assert.equal(containsAlshivalKeyword("https://broward-ai-knowledge-center.alshival.cloud/"), false);
+  assert.equal(containsAlshivalKeyword("https://github.com/Alshival-Ai/test-repo"), false);
+  assert.equal(containsAlshivalKeyword("See Alshival-Ai/test-repo"), false);
+  assert.equal(containsAlshivalKeyword("Visit alshival.cloud for details"), false);
+  assert.equal(containsAlshivalKeyword("support@alshival.ai"), false);
   assert.equal(containsAlshivalKeyword(undefined), false);
 });
 
